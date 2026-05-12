@@ -17,6 +17,8 @@ class Leaderboard(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+    @commands.guild_only()
+    @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="leaderboard", aliases=["lb", "top"])
     async def leaderboard(self, ctx: commands.Context, category: str = "online") -> None:
         """Show the top 10 members by online, gaming, or voice time.

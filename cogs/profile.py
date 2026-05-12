@@ -67,6 +67,8 @@ class Profile(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+    @commands.guild_only()
+    @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="profile", aliases=["stats"])
     async def profile(self, ctx: commands.Context, member: discord.Member = None) -> None:
         """Show activity stats for yourself or another member."""

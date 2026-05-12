@@ -21,7 +21,12 @@ class Admin(commands.Cog):
         if not _is_admin(ctx):
             await ctx.send("You need Administrator permission or the Admin role to use this.")
             return
-        cmds = "`!admin reset @member` — zero a member's stats\n`!admin info @member` — raw stat dump\n`!admin sessions` — show active tracking sessions"
+        cmds = (
+            "`!admin reset @member` — zero a member's stats\n"
+            "`!admin info @member` — raw stat dump\n"
+            "`!admin sessions` — show active tracking sessions\n"
+            "`!admin reload <cog>` — hot-reload a cog (e.g. `tracking`)"
+        )
         embed = discord.Embed(title="POPG Admin Commands", description=cmds, color=discord.Color.red())
         await ctx.send(embed=embed)
 
@@ -97,6 +102,21 @@ class Admin(commands.Cog):
 
         embed.description = "\n".join(lines)
         await ctx.send(embed=embed)
+
+    @admin_group.command(name="reload")
+    async def admin_reload(self, ctx: commands.Context, cog_name: str) -> None:
+        """Reload a cog without restarting the bot. Use the short name, e.g. tracking."""
+        if not _is_admin(ctx):
+            await ctx.send("You need Administrator permission to use this.")
+            return
+        full_name = cog_name if "." in cog_name else f"cogs.{cog_name}"
+        try:
+            await self.bot.reload_extension(full_name)
+            await ctx.send(f"Reloaded `{full_name}`.")
+        except commands.ExtensionNotLoaded:
+            await ctx.send(f"`{full_name}` is not loaded. Use `!admin load {cog_name}` instead.")
+        except Exception as e:
+            await ctx.send(f"Failed to reload `{full_name}`: {e}")
 
     @admin_reset.error
     @admin_info.error

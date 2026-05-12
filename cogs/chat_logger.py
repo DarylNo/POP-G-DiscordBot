@@ -45,6 +45,7 @@ class ChatLogger(commands.Cog):
     # Admin commands
     # ------------------------------------------------------------------
 
+    @commands.guild_only()
     @commands.group(name="log", invoke_without_command=True)
     async def log_group(self, ctx: commands.Context) -> None:
         """Manage chat channel logging."""
