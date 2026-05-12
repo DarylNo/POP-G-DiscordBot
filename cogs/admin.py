@@ -8,9 +8,7 @@ from cogs.profile import _fmt_duration, _fmt_dt
 
 
 def _is_admin(ctx: commands.Context) -> bool:
-    if ctx.author.guild_permissions.administrator:
-        return True
-    return any(r.name.lower() == "admin" for r in ctx.author.roles)
+    return ctx.author.guild_permissions.administrator
 
 
 class Admin(commands.Cog):
