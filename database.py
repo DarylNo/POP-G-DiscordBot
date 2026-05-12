@@ -50,6 +50,23 @@ def init_db() -> None:
             last_played    TEXT    NOT NULL,
             UNIQUE(user_id, game_name)
         );
+
+        CREATE TABLE IF NOT EXISTS watched_channels (
+            channel_id INTEGER PRIMARY KEY,
+            channel_name TEXT NOT NULL,
+            added_at   TEXT NOT NULL,
+            added_by   INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL UNIQUE,
+            channel_id INTEGER NOT NULL REFERENCES watched_channels(channel_id),
+            user_id    INTEGER NOT NULL,
+            username   TEXT    NOT NULL,
+            content    TEXT    NOT NULL,
+            sent_at    TEXT    NOT NULL
+        );
     """)
     conn.commit()
 
@@ -204,3 +221,59 @@ def get_all_users() -> list[dict]:
     conn = get_conn()
     rows = conn.execute("SELECT * FROM users").fetchall()
     return [dict(r) for r in rows]
+
+
+# --- Chat logging ---
+
+def add_watched_channel(channel_id: int, channel_name: str, added_by: int) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO watched_channels (channel_id, channel_name, added_at, added_by) VALUES (?, ?, ?, ?)",
+        (channel_id, channel_name, _now(), added_by),
+    )
+    conn.commit()
+
+
+def remove_watched_channel(channel_id: int) -> bool:
+    conn = get_conn()
+    affected = conn.execute(
+        "DELETE FROM watched_channels WHERE channel_id=?", (channel_id,)
+    ).rowcount
+    conn.commit()
+    return affected > 0
+
+
+def get_watched_channels() -> list[int]:
+    conn = get_conn()
+    rows = conn.execute("SELECT channel_id FROM watched_channels").fetchall()
+    return [r["channel_id"] for r in rows]
+
+
+def get_watched_channels_detail() -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM watched_channels ORDER BY added_at").fetchall()
+    return [dict(r) for r in rows]
+
+
+def log_message(message_id: int, channel_id: int, user_id: int, username: str, content: str, sent_at: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        """INSERT OR IGNORE INTO chat_messages (message_id, channel_id, user_id, username, content, sent_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (message_id, channel_id, user_id, username, content, sent_at),
+    )
+    conn.commit()
+
+
+def get_recent_messages(channel_id: int, limit: int = 100) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM chat_messages WHERE channel_id=? ORDER BY sent_at DESC LIMIT ?",
+        (channel_id, limit),
+    ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def get_messages_for_llm(channel_id: int, limit: int = 200) -> list[dict]:
+    """Return messages as plain dicts ready to serialize into an LLM prompt."""
+    return get_recent_messages(channel_id, limit)
