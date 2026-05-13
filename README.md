@@ -103,6 +103,43 @@ python3 bot.py
 
 ---
 
+## Running with Docker (recommended for 24/7 hosting)
+
+Docker handles auto-restart on crash or reboot with no extra setup.
+
+### Prerequisites
+- [Install Docker](https://docs.docker.com/get-docker/)
+
+### Quick start
+
+```bash
+# 1. Clone the repo and configure .env as above (Steps 1–4)
+
+# 2. Build and start in the background
+docker compose up -d --build
+```
+
+The bot is now running. The database and logs are saved to a `data/` folder in the project directory so they survive container restarts and rebuilds.
+
+### Useful commands
+
+```bash
+# View live logs
+docker logs -f popg-bot
+
+# Stop the bot
+docker compose stop
+
+# Start again
+docker compose start
+
+# Apply code updates from git
+git pull
+docker compose up -d --build
+```
+
+---
+
 ## Requirements
 
 - Python 3.10+

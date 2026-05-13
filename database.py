@@ -1,9 +1,10 @@
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-DB_PATH = "popg.db"
+DB_PATH = os.path.join(os.getenv("DATA_DIR", "."), "popg.db")
 
 _local = threading.local()
 

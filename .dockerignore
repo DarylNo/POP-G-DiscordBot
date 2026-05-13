@@ -1,10 +1,10 @@
 .env
+venv/
+.venv/
+data/
 __pycache__/
 *.pyc
 *.pyo
 *.db
-*.sqlite3
 *.log
-.venv/
-venv/
-data/
+.git/

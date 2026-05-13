@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import signal
 from logging.handlers import RotatingFileHandler
 
@@ -10,10 +11,15 @@ import config
 import database
 
 # --- Logging: console + rotating file ---
+_data_dir = os.getenv("DATA_DIR", ".")
+os.makedirs(_data_dir, exist_ok=True)
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 _console = logging.StreamHandler()
 _console.setFormatter(_fmt)
-_file = RotatingFileHandler("popg.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_file = RotatingFileHandler(
+    os.path.join(_data_dir, "popg.log"),
+    maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
 _file.setFormatter(_fmt)
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 log = logging.getLogger("popg")
