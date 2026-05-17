@@ -5,9 +5,11 @@ import database
 from cogs.profile import _fmt_duration
 
 CATEGORIES = {
-    "online": ("total_online_seconds", "Online Time", discord.Color.green()),
-    "gaming": ("total_gaming_seconds", "Gaming Time", discord.Color.orange()),
-    "voice":  ("total_voice_seconds",  "Voice Time",  discord.Color.purple()),
+    "online":   ("total_online_seconds",  "Online Time",   discord.Color.green()),
+    "gaming":   ("total_gaming_seconds",  "Gaming Time",   discord.Color.orange()),
+    "voice":    ("total_voice_seconds",   "Voice Time",    discord.Color.purple()),
+    "desktop":  ("total_desktop_seconds", "Desktop Time",  discord.Color.blue()),
+    "mobile":   ("total_mobile_seconds",  "Mobile Time",   discord.Color.teal()),
 }
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -30,7 +32,7 @@ class Leaderboard(commands.Cog):
         """
         category = category.lower()
         if category not in CATEGORIES:
-            await ctx.send(f"Unknown category `{category}`. Choose from: `online`, `gaming`, `voice`.")
+            await ctx.send(f"Unknown category `{category}`. Choose from: `online`, `gaming`, `voice`, `desktop`, `mobile`.")
             return
 
         col, label, color = CATEGORIES[category]

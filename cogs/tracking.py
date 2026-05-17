@@ -28,6 +28,14 @@ def _is_online(status: discord.Status) -> bool:
     return status in (discord.Status.online, discord.Status.dnd)
 
 
+def _get_platform(member: discord.Member) -> str:
+    """Return 'mobile' if only on mobile, 'desktop' for desktop or web (desktop takes priority)."""
+    active = lambda s: s in (discord.Status.online, discord.Status.dnd)
+    if active(member.desktop_status) or active(member.web_status):
+        return "desktop"
+    return "mobile"
+
+
 class Tracking(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -60,7 +68,7 @@ class Tracking(commands.Cog):
             self._ensure_user(member)
 
             if _is_online(member.status):
-                database.open_session(member.id, "online")
+                database.open_session(member.id, "online", platform=_get_platform(member))
 
             game = _get_game(member)
             if game:
@@ -108,8 +116,8 @@ class Tracking(commands.Cog):
         now_online = _is_online(after.status)
 
         if not was_online and now_online:
-            database.open_session(after.id, "online")
-            log.debug("%s came online", after.display_name)
+            database.open_session(after.id, "online", platform=_get_platform(after))
+            log.debug("%s came online (%s)", after.display_name, _get_platform(after))
         elif was_online and not now_online:
             elapsed = database.close_session(after.id, "online")
             log.debug("%s went offline (online for %ss)", after.display_name, elapsed)

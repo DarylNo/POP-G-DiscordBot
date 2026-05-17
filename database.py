@@ -22,14 +22,16 @@ def init_db() -> None:
     conn = get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id              INTEGER PRIMARY KEY,
-            username             TEXT    NOT NULL,
-            display_name         TEXT    NOT NULL,
-            first_seen           TEXT    NOT NULL,
-            last_seen            TEXT    NOT NULL,
-            total_online_seconds INTEGER NOT NULL DEFAULT 0,
-            total_gaming_seconds INTEGER NOT NULL DEFAULT 0,
-            total_voice_seconds  INTEGER NOT NULL DEFAULT 0
+            user_id                INTEGER PRIMARY KEY,
+            username               TEXT    NOT NULL,
+            display_name           TEXT    NOT NULL,
+            first_seen             TEXT    NOT NULL,
+            last_seen              TEXT    NOT NULL,
+            total_online_seconds   INTEGER NOT NULL DEFAULT 0,
+            total_gaming_seconds   INTEGER NOT NULL DEFAULT 0,
+            total_voice_seconds    INTEGER NOT NULL DEFAULT 0,
+            total_desktop_seconds  INTEGER NOT NULL DEFAULT 0,
+            total_mobile_seconds   INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -38,6 +40,7 @@ def init_db() -> None:
             session_type     TEXT    NOT NULL CHECK(session_type IN ('online','gaming','voice')),
             game_name        TEXT,
             voice_channel_id INTEGER,
+            platform         TEXT,
             started_at       TEXT    NOT NULL,
             ended_at         TEXT
         );
@@ -69,6 +72,16 @@ def init_db() -> None:
             sent_at    TEXT    NOT NULL
         );
     """)
+    # Migrations for existing databases
+    for migration in [
+        "ALTER TABLE users ADD COLUMN total_desktop_seconds INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN total_mobile_seconds INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE sessions ADD COLUMN platform TEXT",
+    ]:
+        try:
+            conn.execute(migration)
+        except Exception:
+            pass  # Column already exists
     conn.commit()
 
 
@@ -95,6 +108,7 @@ def open_session(
     session_type: str,
     game_name: Optional[str] = None,
     voice_channel_id: Optional[int] = None,
+    platform: Optional[str] = None,
 ) -> None:
     conn = get_conn()
     # Avoid duplicate open sessions of the same type
@@ -105,9 +119,9 @@ def open_session(
     if existing:
         return
     conn.execute(
-        """INSERT INTO sessions (user_id, session_type, game_name, voice_channel_id, started_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (user_id, session_type, game_name, voice_channel_id, _now()),
+        """INSERT INTO sessions (user_id, session_type, game_name, voice_channel_id, platform, started_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (user_id, session_type, game_name, voice_channel_id, platform, _now()),
     )
     conn.commit()
 
@@ -119,7 +133,7 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
     """
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, game_name, started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
+        "SELECT id, game_name, platform, started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
         (user_id, session_type),
     ).fetchone()
     if not row:
@@ -147,6 +161,14 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
         f"UPDATE users SET {col}={col}+?, last_seen=? WHERE user_id=?",
         (elapsed, now, user_id),
     )
+
+    # Credit platform-specific column for online sessions
+    if session_type == "online":
+        platform_col = "total_mobile_seconds" if row["platform"] == "mobile" else "total_desktop_seconds"
+        conn.execute(
+            f"UPDATE users SET {platform_col}={platform_col}+? WHERE user_id=?",
+            (elapsed, user_id),
+        )
 
     if session_type == "gaming" and row["game_name"]:
         conn.execute("""
@@ -177,25 +199,38 @@ def get_user_stats(user_id: int) -> Optional[dict]:
     # Include seconds from any currently open sessions
     for session_type, col in [("online", "total_online_seconds"), ("gaming", "total_gaming_seconds"), ("voice", "total_voice_seconds")]:
         active = conn.execute(
-            "SELECT started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
+            "SELECT started_at, platform FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
             (user_id, session_type),
         ).fetchone()
         if active:
             started = datetime.fromisoformat(active["started_at"])
             live_seconds = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
             stats[col] += live_seconds
+            if session_type == "online":
+                platform_col = "total_mobile_seconds" if active["platform"] == "mobile" else "total_desktop_seconds"
+                stats[platform_col] = stats.get(platform_col, 0) + live_seconds
 
     return stats
 
 
 def get_leaderboard(category: str, limit: int = 10) -> list[dict]:
     col_map = {
-        "online": "total_online_seconds",
-        "gaming": "total_gaming_seconds",
-        "voice":  "total_voice_seconds",
+        "online":   "total_online_seconds",
+        "gaming":   "total_gaming_seconds",
+        "voice":    "total_voice_seconds",
+        "desktop":  "total_desktop_seconds",
+        "mobile":   "total_mobile_seconds",
+    }
+    # For live session lookup, desktop/mobile both come from online sessions
+    session_type_map = {
+        "online":  "online",
+        "gaming":  "gaming",
+        "voice":   "voice",
+        "desktop": "online",
+        "mobile":  "online",
     }
     col = col_map.get(category, "total_online_seconds")
-    session_type = category if category in col_map else "online"
+    session_type = session_type_map.get(category, "online")
     conn = get_conn()
 
     rows = conn.execute(
@@ -206,10 +241,17 @@ def get_leaderboard(category: str, limit: int = 10) -> list[dict]:
     results = []
     for row in rows:
         score = row["score"]
-        active = conn.execute(
-            "SELECT started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
-            (row["user_id"], session_type),
-        ).fetchone()
+        if category in ("desktop", "mobile"):
+            # Only count live session if platform matches
+            active = conn.execute(
+                "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' AND platform=? AND ended_at IS NULL",
+                (row["user_id"], category),
+            ).fetchone()
+        else:
+            active = conn.execute(
+                "SELECT started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
+                (row["user_id"], session_type),
+            ).fetchone()
         if active:
             started = datetime.fromisoformat(active["started_at"])
             score += max(0, int((now - started).total_seconds()))
