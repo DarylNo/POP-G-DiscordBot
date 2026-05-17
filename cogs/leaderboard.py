@@ -52,6 +52,15 @@ class Leaderboard(commands.Cog):
                 lines.append(f"{medal} **{name}** — {score}")
             embed.description = "\n".join(lines)
 
+        if category == "gaming":
+            top_games = database.get_top_games(limit=5)
+            if top_games:
+                game_lines = []
+                for rank, g in enumerate(top_games, 1):
+                    medal = MEDALS.get(rank, f"`{rank}.`")
+                    game_lines.append(f"{medal} **{g['game_name']}** — {_fmt_duration(g['total_seconds'])}")
+                embed.add_field(name="Top Games", value="\n".join(game_lines), inline=False)
+
         embed.set_footer(text="Past our Prime Gamers")
         await ctx.send(embed=embed)
 

@@ -215,7 +215,39 @@ def get_leaderboard(category: str, limit: int = 10) -> list[dict]:
     return results[:limit]
 
 
-def get_active_sessions() -> list[dict]:
+def get_top_games(limit: int = 5) -> list[dict]:
+    """Return top games by total time across all members, including live sessions."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT game_name, SUM(total_seconds) as total_seconds, SUM(session_count) as session_count
+           FROM game_stats GROUP BY game_name ORDER BY total_seconds DESC""",
+    ).fetchall()
+
+    # Add time from any currently active gaming sessions
+    live = conn.execute(
+        "SELECT game_name, started_at FROM sessions WHERE session_type='gaming' AND ended_at IS NULL AND game_name IS NOT NULL",
+    ).fetchall()
+
+    totals: dict[str, int] = {r["game_name"]: r["total_seconds"] for r in rows}
+    counts: dict[str, int] = {r["game_name"]: r["session_count"] for r in rows}
+    now = datetime.now(timezone.utc)
+    for s in live:
+        started = datetime.fromisoformat(s["started_at"])
+        elapsed = max(0, int((now - started).total_seconds()))
+        name = s["game_name"]
+        totals[name] = totals.get(name, 0) + elapsed
+        counts[name] = counts.get(name, 0)
+
+    results = [
+        {"game_name": name, "total_seconds": secs, "session_count": counts.get(name, 0)}
+        for name, secs in totals.items()
+        if secs > 0
+    ]
+    results.sort(key=lambda x: x["total_seconds"], reverse=True)
+    return results[:limit]
+
+
+
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM sessions WHERE ended_at IS NULL",
