@@ -112,8 +112,11 @@ def open_session(
     conn.commit()
 
 
-def close_session(user_id: int, session_type: str) -> Optional[int]:
-    """Close the active session and return elapsed seconds, or None if none was open."""
+def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = None) -> Optional[int]:
+    """Close the active session and return elapsed seconds, or None if none was open.
+
+    cap_seconds: if set, credits at most this many seconds regardless of actual elapsed time.
+    """
     conn = get_conn()
     row = conn.execute(
         "SELECT id, game_name, started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
@@ -126,6 +129,8 @@ def close_session(user_id: int, session_type: str) -> Optional[int]:
     started = datetime.fromisoformat(row["started_at"])
     ended = datetime.fromisoformat(now)
     elapsed = max(0, int((ended - started).total_seconds()))
+    if cap_seconds is not None:
+        elapsed = min(elapsed, cap_seconds)
 
     conn.execute(
         "UPDATE sessions SET ended_at=? WHERE id=?",
