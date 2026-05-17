@@ -29,11 +29,34 @@ def _is_online(status: discord.Status) -> bool:
 
 
 def _get_platform(member: discord.Member) -> str:
-    """Return 'mobile' if only on mobile, 'desktop' for desktop or web (desktop takes priority)."""
-    active = lambda s: s in (discord.Status.online, discord.Status.dnd)
-    if active(member.desktop_status) or active(member.web_status):
+    """Detect the platform the member is actively using.
+
+    Uses per-platform status to distinguish: if desktop is idle but mobile
+    is online, they're on their phone. Desktop priority only applies when
+    both platforms show the same level of activity.
+    """
+    desktop_online = member.desktop_status == discord.Status.online or member.web_status == discord.Status.online
+    mobile_online  = member.mobile_status  == discord.Status.online
+    desktop_dnd    = member.desktop_status == discord.Status.dnd    or member.web_status == discord.Status.dnd
+    mobile_dnd     = member.mobile_status  == discord.Status.dnd
+
+    # One platform is clearly active (online), the other is not
+    if desktop_online and not mobile_online:
         return "desktop"
-    return "mobile"
+    if mobile_online and not desktop_online:
+        return "mobile"
+
+    # Both are online — fall back to desktop priority
+    if desktop_online and mobile_online:
+        return "desktop"
+
+    # Neither is 'online'; check dnd
+    if desktop_dnd and not mobile_dnd:
+        return "desktop"
+    if mobile_dnd and not desktop_dnd:
+        return "mobile"
+
+    return "desktop"  # last resort fallback
 
 
 class Tracking(commands.Cog):
