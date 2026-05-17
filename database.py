@@ -190,12 +190,29 @@ def get_leaderboard(category: str, limit: int = 10) -> list[dict]:
         "voice":  "total_voice_seconds",
     }
     col = col_map.get(category, "total_online_seconds")
+    session_type = category if category in col_map else "online"
     conn = get_conn()
+
     rows = conn.execute(
-        f"SELECT user_id, display_name, {col} as score FROM users ORDER BY {col} DESC LIMIT ?",
-        (limit,),
+        f"SELECT user_id, display_name, {col} as score FROM users",
     ).fetchall()
-    return [dict(r) for r in rows]
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for row in rows:
+        score = row["score"]
+        active = conn.execute(
+            "SELECT started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
+            (row["user_id"], session_type),
+        ).fetchone()
+        if active:
+            started = datetime.fromisoformat(active["started_at"])
+            score += max(0, int((now - started).total_seconds()))
+        if score > 0:
+            results.append({"user_id": row["user_id"], "display_name": row["display_name"], "score": score})
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:limit]
 
 
 def get_active_sessions() -> list[dict]:
