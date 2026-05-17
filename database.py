@@ -252,7 +252,7 @@ def get_top_games(limit: int = 5) -> list[dict]:
     return results[:limit]
 
 
-
+def get_active_sessions() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM sessions WHERE ended_at IS NULL",
