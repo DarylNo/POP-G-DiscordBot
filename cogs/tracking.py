@@ -21,7 +21,8 @@ def _get_game(member: discord.Member) -> Optional[str]:
 
 
 def _is_online(status: discord.Status) -> bool:
-    return status in (discord.Status.online, discord.Status.idle, discord.Status.dnd)
+    # idle (yellow moon) = AFK, does not count
+    return status in (discord.Status.online, discord.Status.dnd)
 
 
 class Tracking(commands.Cog):
