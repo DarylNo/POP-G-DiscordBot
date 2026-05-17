@@ -32,7 +32,27 @@ class Leaderboard(commands.Cog):
         """
         category = category.lower()
         if category not in CATEGORIES:
-            await ctx.send(f"Unknown category `{category}`. Choose from: `online`, `gaming`, `voice`, `desktop`, `mobile`.")
+            matched_game, rows = database.get_leaderboard_for_game(category)
+            if not matched_game:
+                await ctx.send(
+                    f"Unknown category or game `{category}`. "
+                    "Try `online`, `gaming`, `voice`, `desktop`, `mobile`, or a game name like `!leaderboard Battlefield`."
+                )
+                return
+            embed = discord.Embed(title=f"POPG — {matched_game}", color=discord.Color.gold())
+            if not rows:
+                embed.description = "No playtime recorded for this game yet."
+            else:
+                lines = []
+                for rank, row in enumerate(rows, 1):
+                    medal = MEDALS.get(rank, f"`{rank}.`")
+                    name = row["display_name"] or "Unknown"
+                    score = _fmt_duration(row["total_seconds"])
+                    sessions = row["session_count"]
+                    lines.append(f"{medal} **{name}** — {score} ({sessions} session{'s' if sessions != 1 else ''})")
+                embed.description = "\n".join(lines)
+            embed.set_footer(text="Past our Prime Gamers")
+            await ctx.send(embed=embed)
             return
 
         col, label, color = CATEGORIES[category]

@@ -1,3 +1,4 @@
+import logging
 import os
 import sqlite3
 import threading
@@ -5,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 DB_PATH = os.path.join(os.getenv("DATA_DIR", "."), "popg.db")
+
+log = logging.getLogger("popg.database")
 
 _local = threading.local()
 
@@ -80,8 +83,10 @@ def init_db() -> None:
     ]:
         try:
             conn.execute(migration)
-        except Exception:
-            pass  # Column already exists
+        except sqlite3.OperationalError:
+            pass  # column already exists — expected on existing databases
+        except Exception as e:
+            log.warning("Migration failed: %s — %s", migration, e)
     conn.commit()
 
 
@@ -305,7 +310,7 @@ def get_active_sessions() -> list[dict]:
 def reset_user(user_id: int) -> bool:
     conn = get_conn()
     affected = conn.execute(
-        "UPDATE users SET total_online_seconds=0, total_gaming_seconds=0, total_voice_seconds=0 WHERE user_id=?",
+        "UPDATE users SET total_online_seconds=0, total_gaming_seconds=0, total_voice_seconds=0, total_desktop_seconds=0, total_mobile_seconds=0 WHERE user_id=?",
         (user_id,),
     ).rowcount
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
@@ -318,6 +323,64 @@ def get_all_users() -> list[dict]:
     conn = get_conn()
     rows = conn.execute("SELECT * FROM users").fetchall()
     return [dict(r) for r in rows]
+
+
+def get_leaderboard_for_game(game_name: str, limit: int = 10) -> tuple[str | None, list[dict]]:
+    """Fuzzy-match game_name against game_stats and return (matched_name, ranked_members)."""
+    conn = get_conn()
+    match = conn.execute(
+        "SELECT game_name FROM game_stats WHERE game_name LIKE ? GROUP BY game_name ORDER BY SUM(total_seconds) DESC LIMIT 1",
+        (f"%{game_name}%",),
+    ).fetchone()
+    if not match:
+        return None, []
+
+    matched = match["game_name"]
+    rows = conn.execute(
+        """SELECT gs.user_id, u.display_name, gs.total_seconds, gs.session_count
+           FROM game_stats gs JOIN users u ON gs.user_id = u.user_id
+           WHERE gs.game_name = ?
+           ORDER BY gs.total_seconds DESC
+           LIMIT ?""",
+        (matched, limit),
+    ).fetchall()
+
+    # Add time from any currently active session for this game
+    now = datetime.now(timezone.utc)
+    live = conn.execute(
+        "SELECT user_id, started_at FROM sessions WHERE session_type='gaming' AND game_name=? AND ended_at IS NULL",
+        (matched,),
+    ).fetchall()
+    live_map: dict[int, int] = {}
+    for s in live:
+        started = datetime.fromisoformat(s["started_at"])
+        live_map[s["user_id"]] = max(0, int((now - started).total_seconds()))
+
+    results = []
+    for row in rows:
+        score = row["total_seconds"] + live_map.get(row["user_id"], 0)
+        results.append({
+            "user_id": row["user_id"],
+            "display_name": row["display_name"],
+            "total_seconds": score,
+            "session_count": row["session_count"],
+        })
+
+    # Include members currently playing but with no historical game_stats entry
+    existing_ids = {r["user_id"] for r in results}
+    for uid, elapsed in live_map.items():
+        if uid not in existing_ids:
+            user = conn.execute("SELECT display_name FROM users WHERE user_id=?", (uid,)).fetchone()
+            if user:
+                results.append({
+                    "user_id": uid,
+                    "display_name": user["display_name"],
+                    "total_seconds": elapsed,
+                    "session_count": 0,
+                })
+
+    results.sort(key=lambda x: x["total_seconds"], reverse=True)
+    return matched, results[:limit]
 
 
 # --- Chat logging ---

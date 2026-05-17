@@ -29,6 +29,24 @@ def _fmt_dt(iso: str) -> str:
         return "Unknown"
 
 
+def _fmt_relative(iso: str) -> str:
+    """Return a human-readable relative time string like '2h ago' or 'just now'."""
+    try:
+        dt = datetime.fromisoformat(iso)
+        delta = int((datetime.now(timezone.utc) - dt).total_seconds())
+    except (ValueError, TypeError):
+        return "Unknown"
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    if delta < 30 * 86400:
+        return f"{delta // 86400}d ago"
+    return _fmt_dt(iso)
+
+
 def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
     embed = discord.Embed(
         title=f"POPG Profile — {stats['display_name']}",
@@ -37,8 +55,15 @@ def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
     if member.avatar:
         embed.set_thumbnail(url=member.avatar.url)
 
-    embed.add_field(name="First Seen", value=_fmt_dt(stats["first_seen"]), inline=True)
-    embed.add_field(name="Last Seen", value=_fmt_dt(stats["last_seen"]), inline=True)
+    try:
+        first_dt = datetime.fromisoformat(stats["first_seen"])
+        days_member = (datetime.now(timezone.utc) - first_dt).days
+        member_since = f"{_fmt_dt(stats['first_seen'])} ({days_member}d)"
+    except (ValueError, TypeError):
+        member_since = "Unknown"
+
+    embed.add_field(name="Member Since", value=member_since, inline=True)
+    embed.add_field(name="Last Active", value=_fmt_relative(stats["last_seen"]), inline=True)
     embed.add_field(name="​", value="​", inline=True)
 
     desktop = stats.get("total_desktop_seconds", 0)
