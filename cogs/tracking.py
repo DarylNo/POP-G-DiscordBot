@@ -1,16 +1,13 @@
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 import config
 import database
 
 log = logging.getLogger("popg.tracking")
-
-GAMING_SESSION_CAP = 6 * 3600  # 6 hours in seconds
 
 
 def _get_game(member: discord.Member) -> Optional[str]:
@@ -104,26 +101,6 @@ class Tracking(commands.Cog):
                 database.open_session(member.id, "voice", voice_channel_id=member.voice.channel.id)
 
         log.info("Presence recovery complete for guild %s", guild.name)
-
-        if not self.enforce_gaming_cap.is_running():
-            self.enforce_gaming_cap.start()
-
-    @tasks.loop(minutes=30)
-    async def enforce_gaming_cap(self) -> None:
-        """Close any gaming session that has exceeded the cap, crediting only the cap amount."""
-        sessions = database.get_active_sessions()
-        now = datetime.now(timezone.utc)
-        for s in sessions:
-            if s["session_type"] != "gaming":
-                continue
-            started = datetime.fromisoformat(s["started_at"])
-            elapsed = (now - started).total_seconds()
-            if elapsed >= GAMING_SESSION_CAP:
-                database.close_session(s["user_id"], "gaming", cap_seconds=GAMING_SESSION_CAP)
-                log.info(
-                    "Capped gaming session for user %d at 6h (was %.1fh)",
-                    s["user_id"], elapsed / 3600,
-                )
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
