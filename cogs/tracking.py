@@ -79,7 +79,7 @@ class Tracking(commands.Cog):
         # Close any sessions the DB thinks are still open (stale from last run)
         stale = database.get_active_sessions()
         for s in stale:
-            database.close_session(s["user_id"], s["session_type"])
+            database.close_session(s["user_id"], s["session_type"], stale=True)
         if stale:
             log.info("Closed %d stale sessions from previous run", len(stale))
 

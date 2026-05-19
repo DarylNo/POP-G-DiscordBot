@@ -131,10 +131,12 @@ def open_session(
     conn.commit()
 
 
-def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = None) -> Optional[int]:
+def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = None, stale: bool = False) -> Optional[int]:
     """Close the active session and return elapsed seconds, or None if none was open.
 
     cap_seconds: if set, credits at most this many seconds regardless of actual elapsed time.
+    stale: if True, the session is being closed due to a bot restart — time is credited but
+           session_count is not incremented (the session wasn't intentionally ended by the user).
     """
     conn = get_conn()
     row = conn.execute(
@@ -176,14 +178,15 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
         )
 
     if session_type == "gaming" and row["game_name"]:
+        count_increment = 0 if stale else 1
         conn.execute("""
             INSERT INTO game_stats (user_id, game_name, total_seconds, session_count, last_played)
-            VALUES (?, ?, ?, 1, ?)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id, game_name) DO UPDATE SET
                 total_seconds = total_seconds + excluded.total_seconds,
-                session_count = session_count + 1,
+                session_count = session_count + excluded.session_count,
                 last_played   = excluded.last_played
-        """, (user_id, row["game_name"], elapsed, now))
+        """, (user_id, row["game_name"], elapsed, count_increment, now))
 
     conn.commit()
     return elapsed
