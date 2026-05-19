@@ -24,7 +24,7 @@ def _get_game(member: discord.Member) -> Optional[str]:
 
 
 def _is_online(status: discord.Status) -> bool:
-    return status == discord.Status.online
+    return status in (discord.Status.online, discord.Status.dnd)
 
 
 def _get_platform(member: discord.Member) -> str:
