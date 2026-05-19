@@ -347,12 +347,22 @@ def get_all_users() -> list[dict]:
 
 
 def get_leaderboard_for_game(game_name: str, limit: int = 10) -> tuple[str | None, list[dict]]:
-    """Fuzzy-match game_name against game_stats and return (matched_name, ranked_members)."""
+    """Fuzzy-match game_name against game_stats and active sessions, return (matched_name, ranked_members)."""
     conn = get_conn()
+    now = datetime.now(timezone.utc)
+
+    # Try game_stats first (closed sessions)
     match = conn.execute(
         "SELECT game_name FROM game_stats WHERE game_name LIKE ? GROUP BY game_name ORDER BY SUM(total_seconds) DESC LIMIT 1",
         (f"%{game_name}%",),
     ).fetchone()
+
+    # Fall back to active sessions if nothing in game_stats yet
+    if not match:
+        match = conn.execute(
+            "SELECT game_name FROM sessions WHERE session_type='gaming' AND ended_at IS NULL AND game_name LIKE ? LIMIT 1",
+            (f"%{game_name}%",),
+        ).fetchone()
     if not match:
         return None, []
 
@@ -367,7 +377,6 @@ def get_leaderboard_for_game(game_name: str, limit: int = 10) -> tuple[str | Non
     ).fetchall()
 
     # Add time from any currently active session for this game
-    now = datetime.now(timezone.utc)
     live = conn.execute(
         "SELECT user_id, started_at FROM sessions WHERE session_type='gaming' AND game_name=? AND ended_at IS NULL",
         (matched,),
@@ -397,7 +406,7 @@ def get_leaderboard_for_game(game_name: str, limit: int = 10) -> tuple[str | Non
                     "user_id": uid,
                     "display_name": user["display_name"],
                     "total_seconds": elapsed,
-                    "session_count": 0,
+                    "session_count": 1,  # currently in a session
                 })
 
     results.sort(key=lambda x: x["total_seconds"], reverse=True)
