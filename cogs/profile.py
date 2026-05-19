@@ -66,10 +66,9 @@ def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
     embed.add_field(name="Last Active", value=_fmt_relative(stats["last_seen"]), inline=True)
     embed.add_field(name="​", value="​", inline=True)
 
-    desktop = stats.get("total_desktop_seconds", 0)
-    mobile = stats.get("total_mobile_seconds", 0)
-    online_detail = f"{_fmt_duration(stats['total_online_seconds'])}\n🖥️ {_fmt_duration(desktop)}  📱 {_fmt_duration(mobile)}"
-    embed.add_field(name="Online Time", value=online_detail, inline=True)
+    embed.add_field(
+        name="Online Time", value=_fmt_duration(stats['total_online_seconds']), inline=True
+    )
     embed.add_field(
         name="Gaming Time", value=_fmt_duration(stats["total_gaming_seconds"]), inline=True
     )

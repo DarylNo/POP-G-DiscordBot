@@ -5,11 +5,9 @@ import database
 from cogs.profile import _fmt_duration
 
 CATEGORIES = {
-    "online":   ("total_online_seconds",  "Online Time",   discord.Color.green()),
-    "gaming":   ("total_gaming_seconds",  "Gaming Time",   discord.Color.orange()),
-    "voice":    ("total_voice_seconds",   "Voice Time",    discord.Color.purple()),
-    "desktop":  ("total_desktop_seconds", "Desktop Time",  discord.Color.blue()),
-    "mobile":   ("total_mobile_seconds",  "Mobile Time",   discord.Color.teal()),
+    "online":  ("total_online_seconds", "Online Time",  discord.Color.green()),
+    "gaming":  ("total_gaming_seconds", "Gaming Time",  discord.Color.orange()),
+    "voice":   ("total_voice_seconds",  "Voice Time",   discord.Color.purple()),
 }
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -36,7 +34,7 @@ class Leaderboard(commands.Cog):
             if not matched_game:
                 await ctx.send(
                     f"Unknown category or game `{category}`. "
-                    "Try `online`, `gaming`, `voice`, `desktop`, `mobile`, or a game name like `!leaderboard Battlefield`."
+                    "Try `online`, `gaming`, `voice`, or a game name like `!leaderboard Battlefield`."
                 )
                 return
             embed = discord.Embed(title=f"POPG — {matched_game}", color=discord.Color.gold())
