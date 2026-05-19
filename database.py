@@ -215,6 +215,24 @@ def get_user_stats(user_id: int) -> Optional[dict]:
                 platform_col = "total_mobile_seconds" if active["platform"] == "mobile" else "total_desktop_seconds"
                 stats[platform_col] = stats.get(platform_col, 0) + live_seconds
 
+    # Inject active gaming session into top_games if not yet committed to game_stats
+    active_game = conn.execute(
+        "SELECT game_name, started_at FROM sessions WHERE user_id=? AND session_type='gaming' AND ended_at IS NULL AND game_name IS NOT NULL",
+        (user_id,),
+    ).fetchone()
+    if active_game:
+        now = datetime.now(timezone.utc)
+        live_secs = max(0, int((now - datetime.fromisoformat(active_game["started_at"])).total_seconds()))
+        game_name = active_game["game_name"]
+        for g in stats["top_games"]:
+            if g["game_name"] == game_name:
+                g["total_seconds"] += live_secs
+                break
+        else:
+            stats["top_games"].insert(0, {"game_name": game_name, "total_seconds": live_secs, "session_count": 1})
+        stats["top_games"].sort(key=lambda x: x["total_seconds"], reverse=True)
+        stats["top_games"] = stats["top_games"][:3]
+
     return stats
 
 
