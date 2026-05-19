@@ -24,8 +24,7 @@ def _get_game(member: discord.Member) -> Optional[str]:
 
 
 def _is_online(status: discord.Status) -> bool:
-    # idle (yellow moon) = AFK, does not count
-    return status in (discord.Status.online, discord.Status.dnd)
+    return status == discord.Status.online
 
 
 def _get_platform(member: discord.Member) -> str:
