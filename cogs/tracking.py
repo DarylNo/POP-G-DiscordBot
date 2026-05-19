@@ -90,14 +90,18 @@ class Tracking(commands.Cog):
                 continue
             self._ensure_user(member)
 
-            if _is_online(member.status):
+            game = _get_game(member)
+            in_voice = member.voice and member.voice.channel
+
+            # Open online session if online/dnd, OR if actively gaming/in voice
+            # (you can't be gaming or in voice while truly offline)
+            if _is_online(member.status) or game or in_voice:
                 database.open_session(member.id, "online", platform=_get_platform(member))
 
-            game = _get_game(member)
             if game:
                 database.open_session(member.id, "gaming", game_name=game)
 
-            if member.voice and member.voice.channel:
+            if in_voice:
                 database.open_session(member.id, "voice", voice_channel_id=member.voice.channel.id)
 
         log.info("Presence recovery complete for guild %s", guild.name)
