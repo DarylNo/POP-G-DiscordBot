@@ -42,7 +42,7 @@ class POPGBot(commands.Bot):
         intents.presences = True
         intents.message_content = True
 
-        super().__init__(command_prefix=config.PREFIX, intents=intents)
+        super().__init__(command_prefix=config.PREFIX, intents=intents, help_command=None)
 
     async def setup_hook(self) -> None:
         database.init_db()
