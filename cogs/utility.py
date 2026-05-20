@@ -16,6 +16,7 @@ USER_COMMANDS = """
 **Social**
 `!accomplices [@member]` — Top gaming partners
 `!crew [@member]` — Top voice channel crew
+`!achievements [@member]` — Earned badges and progress
 
 **Other**
 `!ping` — Check bot latency

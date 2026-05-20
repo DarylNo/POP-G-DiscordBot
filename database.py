@@ -9,6 +9,26 @@ DB_PATH = os.path.join(os.getenv("DATA_DIR", "."), "popg.db")
 
 log = logging.getLogger("popg.database")
 
+# (emoji, display_name, description)
+ACHIEVEMENTS: dict[str, tuple[str, str, str]] = {
+    "online_1h":    ("⏰",  "Warming Up",        "Spend 1 hour online"),
+    "online_24h":   ("🟢",  "Regular",           "Spend 24 hours online"),
+    "online_100h":  ("⭐",  "Dedicated",         "Spend 100 hours online"),
+    "online_500h":  ("🌟",  "Veteran",           "Spend 500 hours online"),
+    "gaming_1h":    ("🎮",  "Gamer",             "Spend 1 hour gaming"),
+    "gaming_50h":   ("💪",  "Hardcore",          "Spend 50 hours gaming"),
+    "gaming_250h":  ("🏆",  "No Life",           "Spend 250 hours gaming"),
+    "voice_1h":     ("🔊",  "Sociable",          "Spend 1 hour in voice"),
+    "voice_24h":    ("💬",  "Chatterbox",        "Spend 24 hours in voice"),
+    "streak_3":     ("🔥",  "On a Roll",         "Achieve a 3-day activity streak"),
+    "streak_7":     ("📅",  "Week Warrior",      "Achieve a 7-day activity streak"),
+    "streak_30":    ("💫",  "Consistent",        "Achieve a 30-day activity streak"),
+    "games_5":      ("🃏",  "Jack of All Trades","Play 5 different games"),
+    "game_50h":     ("🎯",  "One-Trick Pony",    "Spend 50 hours in a single game"),
+    "partners_3":   ("🤝",  "Good Company",      "Play with 3 different people"),
+    "crew_3":       ("👥",  "Voice Regular",     "Share voice time with 3 different people"),
+}
+
 _local = threading.local()
 
 
@@ -98,6 +118,13 @@ def init_db() -> None:
             user_id INTEGER NOT NULL REFERENCES users(user_id),
             date    TEXT    NOT NULL,
             UNIQUE(user_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_achievements (
+            user_id        INTEGER NOT NULL REFERENCES users(user_id),
+            achievement_id TEXT    NOT NULL,
+            earned_at      TEXT    NOT NULL,
+            PRIMARY KEY (user_id, achievement_id)
         );
     """)
     # Migrations for existing databases
@@ -219,6 +246,7 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
             _update_game_partners(conn, user_id, row["game_name"], row["started_at"], now)
         if session_type == "voice" and row["voice_channel_id"]:
             _update_voice_partners(conn, user_id, row["voice_channel_id"], row["started_at"], now)
+        _check_and_award_achievements(conn, user_id)
 
     conn.commit()
     return elapsed
@@ -295,6 +323,89 @@ def _update_voice_partners(
                     session_count  = session_count + 1,
                     last_together  = excluded.last_together
             """, (uid, pid, overlap, ended_at_str))
+
+
+def _check_and_award_achievements(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    """Check all achievement conditions and insert newly earned rows. Returns new achievement IDs."""
+    earned = {r["achievement_id"] for r in conn.execute(
+        "SELECT achievement_id FROM user_achievements WHERE user_id=?", (user_id,)
+    ).fetchall()}
+
+    user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+    if not user:
+        return []
+
+    game_count = conn.execute(
+        "SELECT COUNT(DISTINCT game_name) as c FROM game_stats WHERE user_id=?", (user_id,)
+    ).fetchone()["c"]
+    max_game_secs = conn.execute(
+        "SELECT COALESCE(MAX(total_seconds), 0) as m FROM game_stats WHERE user_id=?", (user_id,)
+    ).fetchone()["m"]
+    partner_count = conn.execute(
+        "SELECT COUNT(DISTINCT partner_id) as c FROM game_partners WHERE user_id=?", (user_id,)
+    ).fetchone()["c"]
+    crew_count = conn.execute(
+        "SELECT COUNT(DISTINCT partner_id) as c FROM voice_partners WHERE user_id=?", (user_id,)
+    ).fetchone()["c"]
+
+    # Streak uses the same connection so uncommitted activity_days rows are visible
+    current_streak, longest_streak = get_streaks(user_id)
+    best_streak = max(current_streak, longest_streak)
+
+    o = user["total_online_seconds"]
+    g = user["total_gaming_seconds"]
+    v = user["total_voice_seconds"]
+
+    checks = {
+        "online_1h":   o >= 3_600,
+        "online_24h":  o >= 86_400,
+        "online_100h": o >= 360_000,
+        "online_500h": o >= 1_800_000,
+        "gaming_1h":   g >= 3_600,
+        "gaming_50h":  g >= 180_000,
+        "gaming_250h": g >= 900_000,
+        "voice_1h":    v >= 3_600,
+        "voice_24h":   v >= 86_400,
+        "streak_3":    best_streak >= 3,
+        "streak_7":    best_streak >= 7,
+        "streak_30":   best_streak >= 30,
+        "games_5":     game_count >= 5,
+        "game_50h":    max_game_secs >= 180_000,
+        "partners_3":  partner_count >= 3,
+        "crew_3":      crew_count >= 3,
+    }
+
+    now = _now()
+    new_ids = []
+    for ach_id, condition in checks.items():
+        if condition and ach_id not in earned:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_achievements (user_id, achievement_id, earned_at) VALUES (?, ?, ?)",
+                (user_id, ach_id, now),
+            )
+            new_ids.append(ach_id)
+    return new_ids
+
+
+def get_achievements(user_id: int) -> list[dict]:
+    """Return all achievements with earned status for the given user."""
+    conn = get_conn()
+    earned_map = {r["achievement_id"]: r["earned_at"] for r in conn.execute(
+        "SELECT achievement_id, earned_at FROM user_achievements WHERE user_id=? ORDER BY earned_at",
+        (user_id,),
+    ).fetchall()}
+
+    result = []
+    for ach_id, (emoji, name, description) in ACHIEVEMENTS.items():
+        result.append({
+            "id": ach_id,
+            "emoji": emoji,
+            "name": name,
+            "description": description,
+            "earned": ach_id in earned_map,
+            "earned_at": earned_map.get(ach_id),
+        })
+    return result
 
 
 def get_user_stats(user_id: int) -> Optional[dict]:

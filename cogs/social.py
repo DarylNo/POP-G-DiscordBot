@@ -85,6 +85,46 @@ class Social(commands.Cog):
         if isinstance(error, commands.BadArgument):
             await ctx.send("Could not find that member. Try mentioning them with @.")
 
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    @commands.command(name="achievements", aliases=["badges", "ach"])
+    async def achievements(self, ctx: commands.Context, member: discord.Member = None) -> None:
+        """Show earned and locked achievements for yourself or another member."""
+        if ctx.guild is None:
+            target = _guild_member(ctx)
+            if target is None:
+                await ctx.send("You need to be a member of the POPG server to use this command.")
+                return
+        else:
+            target = member or ctx.author
+
+        all_achievements = database.get_achievements(target.id)
+        earned = [a for a in all_achievements if a["earned"]]
+        locked = [a for a in all_achievements if not a["earned"]]
+
+        embed = discord.Embed(
+            title=f"Achievements — {target.display_name}",
+            description=f"**{len(earned)}/{len(all_achievements)}** badges earned",
+            color=discord.Color.gold(),
+        )
+        if target.avatar:
+            embed.set_thumbnail(url=target.avatar.url)
+
+        if earned:
+            lines = [f"{a['emoji']} **{a['name']}** — {a['description']}" for a in earned]
+            embed.add_field(name=f"Earned ({len(earned)})", value="\n".join(lines), inline=False)
+
+        if locked:
+            lines = [f"{a['emoji']} {a['name']} — {a['description']}" for a in locked]
+            embed.add_field(name=f"Locked ({len(locked)})", value="\n".join(lines), inline=False)
+
+        embed.set_footer(text="Past our Prime Gamers")
+        await ctx.send(embed=embed)
+
+    @achievements.error
+    async def achievements_error(self, ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.BadArgument):
+            await ctx.send("Could not find that member. Try mentioning them with @.")
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Social(bot))
