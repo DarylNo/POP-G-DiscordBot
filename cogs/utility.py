@@ -9,9 +9,10 @@ USER_COMMANDS = """
 `!stats [@member]` — Same as !profile
 
 **Leaderboards**
-`!leaderboard [online|gaming|voice]` — All-time top 10
+`!leaderboard [online|gaming|voice]` — This week's top 10
+`!leaderboard all [online|gaming|voice]` — All-time top 10
 `!leaderboard <game>` — Top players for a specific game
-`!weekly [online|gaming|voice]` — This week's top 10
+`!weekly [online|gaming|voice]` — Same as !leaderboard
 
 **Social**
 `!accomplices [@member]` — Top gaming partners
