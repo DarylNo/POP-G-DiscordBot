@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 
 import database
-from cogs.profile import _fmt_duration
+from cogs.profile import _fmt_duration, _guild_member
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
@@ -11,12 +11,17 @@ class Social(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="accomplices", aliases=["partners"])
     async def accomplices(self, ctx: commands.Context, member: discord.Member = None) -> None:
         """Show who you (or another member) play games with most."""
-        target = member or ctx.author
+        if ctx.guild is None:
+            target = _guild_member(ctx)
+            if target is None:
+                await ctx.send("You need to be a member of the POPG server to use this command.")
+                return
+        else:
+            target = member or ctx.author
         rows = database.get_accomplices(target.id, limit=5)
 
         embed = discord.Embed(
@@ -43,12 +48,17 @@ class Social(commands.Cog):
         if isinstance(error, commands.BadArgument):
             await ctx.send("Could not find that member. Try mentioning them with @.")
 
-    @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="crew")
     async def crew(self, ctx: commands.Context, member: discord.Member = None) -> None:
         """Show who you (or another member) spend the most voice time with."""
-        target = member or ctx.author
+        if ctx.guild is None:
+            target = _guild_member(ctx)
+            if target is None:
+                await ctx.send("You need to be a member of the POPG server to use this command.")
+                return
+        else:
+            target = member or ctx.author
         rows = database.get_voice_crew(target.id, limit=5)
 
         embed = discord.Embed(

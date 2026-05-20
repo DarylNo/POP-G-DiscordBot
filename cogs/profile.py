@@ -3,7 +3,22 @@ from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
+import config
 import database
+
+
+def _guild_member(ctx: commands.Context) -> discord.Member | None:
+    """Return the invoking user as a guild Member, or None if they're not in the guild.
+
+    Works both in-server (returns ctx.author directly) and in DMs (looks them
+    up in the configured guild so DM users can still access their own stats).
+    """
+    if ctx.guild is not None:
+        return ctx.author
+    guild = ctx.bot.get_guild(config.GUILD_ID)
+    if guild:
+        return guild.get_member(ctx.author.id)
+    return None
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -100,12 +115,18 @@ class Profile(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="profile", aliases=["stats"])
     async def profile(self, ctx: commands.Context, member: discord.Member = None) -> None:
         """Show activity stats for yourself or another member."""
-        target = member or ctx.author
+        if ctx.guild is None:
+            # DM — ignore any member arg, always show the sender's own stats
+            target = _guild_member(ctx)
+            if target is None:
+                await ctx.send("You need to be a member of the POPG server to use this command.")
+                return
+        else:
+            target = member or ctx.author
         stats = database.get_user_stats(target.id)
         if stats is None:
             await ctx.send(f"No data found for **{target.display_name}**. They may need to be online while the bot is running.")

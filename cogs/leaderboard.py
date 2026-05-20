@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 
 import database
-from cogs.profile import _fmt_duration
+from cogs.profile import _fmt_duration, _guild_member
 
 CATEGORIES = {
     "online":  ("total_online_seconds", "Online Time",  discord.Color.green()),
@@ -17,7 +17,6 @@ class Leaderboard(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="leaderboard", aliases=["lb", "top"])
     async def leaderboard(self, ctx: commands.Context, category: str = "online") -> None:
@@ -28,6 +27,9 @@ class Leaderboard(commands.Cog):
           !leaderboard gaming   — gaming time
           !leaderboard voice    — voice time
         """
+        if ctx.guild is None and _guild_member(ctx) is None:
+            await ctx.send("You need to be a member of the POPG server to use this command.")
+            return
         category = category.lower()
         if category not in CATEGORIES:
             matched_game, rows = database.get_leaderboard_for_game(category)
@@ -88,11 +90,13 @@ class Leaderboard(commands.Cog):
     async def leaderboard_error(self, ctx: commands.Context, error: Exception) -> None:
         await ctx.send("Usage: `!leaderboard [online|gaming|voice]`")
 
-    @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="weekly", aliases=["week"])
     async def weekly(self, ctx: commands.Context, category: str = "online") -> None:
         """Show this week's top members by online, gaming, or voice time."""
+        if ctx.guild is None and _guild_member(ctx) is None:
+            await ctx.send("You need to be a member of the POPG server to use this command.")
+            return
         category = category.lower()
         if category not in ("online", "gaming", "voice"):
             await ctx.send("Choose a category: `online`, `gaming`, or `voice`.")
