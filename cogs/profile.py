@@ -107,6 +107,22 @@ def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
     else:
         embed.add_field(name="Top Games", value="No games tracked yet.", inline=False)
 
+    accomplices = database.get_accomplices(stats["user_id"], limit=3)
+    if accomplices:
+        lines = [
+            f"{i}. **{r['display_name']}** — {_fmt_duration(r['total_seconds'])} together"
+            for i, r in enumerate(accomplices, 1)
+        ]
+        embed.add_field(name="Known Accomplices", value="\n".join(lines), inline=False)
+
+    crew = database.get_voice_crew(stats["user_id"], limit=3)
+    if crew:
+        lines = [
+            f"{i}. **{r['display_name']}** — {_fmt_duration(r['total_seconds'])} together"
+            for i, r in enumerate(crew, 1)
+        ]
+        embed.add_field(name="Voice Crew", value="\n".join(lines), inline=False)
+
     embed.set_footer(text="Past our Prime Gamers")
     return embed
 
