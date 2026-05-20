@@ -15,11 +15,6 @@ ACHIEVEMENTS: dict[str, tuple[str, str, str]] = {
     "online_24h":   ("🟢",  "Regular",           "Spend 24 hours online"),
     "online_100h":  ("⭐",  "Dedicated",         "Spend 100 hours online"),
     "online_500h":  ("🌟",  "Veteran",           "Spend 500 hours online"),
-    "gaming_1h":    ("🎮",  "Gamer",             "Spend 1 hour gaming"),
-    "gaming_50h":   ("💪",  "Hardcore",          "Spend 50 hours gaming"),
-    "gaming_250h":  ("🏆",  "No Life",           "Spend 250 hours gaming"),
-    "voice_1h":     ("🔊",  "Sociable",          "Spend 1 hour in voice"),
-    "voice_24h":    ("💬",  "Chatterbox",        "Spend 24 hours in voice"),
     "streak_3":     ("🔥",  "On a Roll",         "Achieve a 3-day activity streak"),
     "streak_7":     ("📅",  "Week Warrior",      "Achieve a 7-day activity streak"),
     "streak_30":    ("💫",  "Consistent",        "Achieve a 30-day activity streak"),
@@ -353,19 +348,12 @@ def _check_and_award_achievements(conn: sqlite3.Connection, user_id: int) -> lis
     best_streak = max(current_streak, longest_streak)
 
     o = user["total_online_seconds"]
-    g = user["total_gaming_seconds"]
-    v = user["total_voice_seconds"]
 
     checks = {
         "online_1h":   o >= 3_600,
         "online_24h":  o >= 86_400,
         "online_100h": o >= 360_000,
         "online_500h": o >= 1_800_000,
-        "gaming_1h":   g >= 3_600,
-        "gaming_50h":  g >= 180_000,
-        "gaming_250h": g >= 900_000,
-        "voice_1h":    v >= 3_600,
-        "voice_24h":   v >= 86_400,
         "streak_3":    best_streak >= 3,
         "streak_7":    best_streak >= 7,
         "streak_30":   best_streak >= 30,
