@@ -5,20 +5,20 @@ from cogs.admin import _is_admin
 
 USER_COMMANDS = """
 **Stats**
-`!profile [@member]` — Your activity stats (or another member's)
-`!stats [@member]` — Same as !profile
+`!profile [@member]` — Full stat dump: time, streak, badges, top games, accomplices, crew
 
 **Leaderboards**
-`!leaderboard [online|gaming|voice]` — This week's top 10
+`!leaderboard [online|gaming|voice]` — This week's top 10 (default: online)
 `!leaderboard month [online|gaming|voice]` — This month's top 10
 `!leaderboard all [online|gaming|voice]` — All-time top 10
-`!leaderboard <game>` — Top players for a specific game
-`!weekly` / `!monthly` — Shortcuts for week/month views
+`!leaderboard <game name>` — Top players for a specific game
+`!weekly [online|gaming|voice]` — Shortcut for this week's leaderboard
+`!monthly [online|gaming|voice]` — Shortcut for this month's leaderboard
 
 **Social**
-`!accomplices [@member]` — Top gaming partners
-`!crew [@member]` — Top voice channel crew
-`!achievements [@member]` — Earned badges and progress
+`!accomplices [@member]` — Top gaming partners (who you play games with most)
+`!crew [@member]` — Top voice crew (who you hang out in voice with most)
+`!achievements [@member]` — Earned badges and locked ones still to unlock
 
 **Other**
 `!ping` — Check bot latency
