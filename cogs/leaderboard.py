@@ -88,6 +88,39 @@ class Leaderboard(commands.Cog):
     async def leaderboard_error(self, ctx: commands.Context, error: Exception) -> None:
         await ctx.send("Usage: `!leaderboard [online|gaming|voice]`")
 
+    @commands.guild_only()
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    @commands.command(name="weekly", aliases=["week"])
+    async def weekly(self, ctx: commands.Context, category: str = "online") -> None:
+        """Show this week's top members by online, gaming, or voice time."""
+        category = category.lower()
+        if category not in ("online", "gaming", "voice"):
+            await ctx.send("Choose a category: `online`, `gaming`, or `voice`.")
+            return
+
+        _, label, color = CATEGORIES[category]
+        rows = database.get_weekly_leaderboard(category, limit=10)
+
+        embed = discord.Embed(
+            title=f"POPG — {label} This Week",
+            color=color,
+        )
+        if not rows:
+            embed.description = "No activity recorded this week yet."
+        else:
+            lines = []
+            for rank, row in enumerate(rows, 1):
+                medal = MEDALS.get(rank, f"`{rank}.`")
+                lines.append(f"{medal} **{row['display_name']}** — {_fmt_duration(row['score'])}")
+            embed.description = "\n".join(lines)
+
+        embed.set_footer(text="Past our Prime Gamers · Resets Monday")
+        await ctx.send(embed=embed)
+
+    @weekly.error
+    async def weekly_error(self, ctx: commands.Context, error: Exception) -> None:
+        await ctx.send("Usage: `!weekly [online|gaming|voice]`")
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Leaderboard(bot))

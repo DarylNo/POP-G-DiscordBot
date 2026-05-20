@@ -76,6 +76,14 @@ def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
         name="Voice Time", value=_fmt_duration(stats["total_voice_seconds"]), inline=True
     )
 
+    current_streak, longest_streak = database.get_streaks(stats["user_id"])
+    if current_streak > 0 or longest_streak > 0:
+        embed.add_field(
+            name="Streak",
+            value=f"🔥 {current_streak}d current · {longest_streak}d best",
+            inline=True,
+        )
+
     if stats["top_games"]:
         lines = []
         for i, g in enumerate(stats["top_games"], 1):

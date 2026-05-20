@@ -2,7 +2,7 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 DB_PATH = os.path.join(os.getenv("DATA_DIR", "."), "popg.db")
@@ -74,6 +74,31 @@ def init_db() -> None:
             content    TEXT    NOT NULL,
             sent_at    TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS game_partners (
+            user_id        INTEGER NOT NULL REFERENCES users(user_id),
+            partner_id     INTEGER NOT NULL REFERENCES users(user_id),
+            game_name      TEXT    NOT NULL,
+            shared_seconds INTEGER NOT NULL DEFAULT 0,
+            session_count  INTEGER NOT NULL DEFAULT 0,
+            last_played    TEXT    NOT NULL,
+            UNIQUE(user_id, partner_id, game_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS voice_partners (
+            user_id        INTEGER NOT NULL REFERENCES users(user_id),
+            partner_id     INTEGER NOT NULL REFERENCES users(user_id),
+            shared_seconds INTEGER NOT NULL DEFAULT 0,
+            session_count  INTEGER NOT NULL DEFAULT 0,
+            last_together  TEXT    NOT NULL,
+            UNIQUE(user_id, partner_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS activity_days (
+            user_id INTEGER NOT NULL REFERENCES users(user_id),
+            date    TEXT    NOT NULL,
+            UNIQUE(user_id, date)
+        );
     """)
     # Migrations for existing databases
     for migration in [
@@ -140,7 +165,7 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
     """
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, game_name, platform, started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
+        "SELECT id, game_name, voice_channel_id, platform, started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
         (user_id, session_type),
     ).fetchone()
     if not row:
@@ -188,8 +213,88 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
                 last_played   = excluded.last_played
         """, (user_id, row["game_name"], elapsed, count_increment, now))
 
+    if not stale:
+        _record_activity_day(conn, user_id, now[:10])
+        if session_type == "gaming" and row["game_name"]:
+            _update_game_partners(conn, user_id, row["game_name"], row["started_at"], now)
+        if session_type == "voice" and row["voice_channel_id"]:
+            _update_voice_partners(conn, user_id, row["voice_channel_id"], row["started_at"], now)
+
     conn.commit()
     return elapsed
+
+
+def _record_activity_day(conn: sqlite3.Connection, user_id: int, date_str: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO activity_days (user_id, date) VALUES (?, ?)",
+        (user_id, date_str),
+    )
+
+
+def _update_game_partners(
+    conn: sqlite3.Connection, user_id: int, game_name: str, started_at_str: str, ended_at_str: str
+) -> None:
+    overlapping = conn.execute(
+        """SELECT user_id, started_at, ended_at FROM sessions
+           WHERE session_type='gaming' AND game_name=? AND user_id!=?
+             AND started_at < ? AND (ended_at IS NULL OR ended_at > ?)""",
+        (game_name, user_id, ended_at_str, started_at_str),
+    ).fetchall()
+    if not overlapping:
+        return
+
+    a_start = datetime.fromisoformat(started_at_str)
+    a_end = datetime.fromisoformat(ended_at_str)
+
+    for partner in overlapping:
+        b_start = datetime.fromisoformat(partner["started_at"])
+        b_end = datetime.fromisoformat(partner["ended_at"]) if partner["ended_at"] else datetime.now(timezone.utc)
+        overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+        if overlap <= 0:
+            continue
+        partner_id = partner["user_id"]
+        for uid, pid in [(user_id, partner_id), (partner_id, user_id)]:
+            conn.execute("""
+                INSERT INTO game_partners (user_id, partner_id, game_name, shared_seconds, session_count, last_played)
+                VALUES (?, ?, ?, ?, 1, ?)
+                ON CONFLICT(user_id, partner_id, game_name) DO UPDATE SET
+                    shared_seconds = shared_seconds + excluded.shared_seconds,
+                    session_count  = session_count + 1,
+                    last_played    = excluded.last_played
+            """, (uid, pid, game_name, overlap, ended_at_str))
+
+
+def _update_voice_partners(
+    conn: sqlite3.Connection, user_id: int, channel_id: int, started_at_str: str, ended_at_str: str
+) -> None:
+    overlapping = conn.execute(
+        """SELECT user_id, started_at, ended_at FROM sessions
+           WHERE session_type='voice' AND voice_channel_id=? AND user_id!=?
+             AND started_at < ? AND (ended_at IS NULL OR ended_at > ?)""",
+        (channel_id, user_id, ended_at_str, started_at_str),
+    ).fetchall()
+    if not overlapping:
+        return
+
+    a_start = datetime.fromisoformat(started_at_str)
+    a_end = datetime.fromisoformat(ended_at_str)
+
+    for partner in overlapping:
+        b_start = datetime.fromisoformat(partner["started_at"])
+        b_end = datetime.fromisoformat(partner["ended_at"]) if partner["ended_at"] else datetime.now(timezone.utc)
+        overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+        if overlap <= 0:
+            continue
+        partner_id = partner["user_id"]
+        for uid, pid in [(user_id, partner_id), (partner_id, user_id)]:
+            conn.execute("""
+                INSERT INTO voice_partners (user_id, partner_id, shared_seconds, session_count, last_together)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(user_id, partner_id) DO UPDATE SET
+                    shared_seconds = shared_seconds + excluded.shared_seconds,
+                    session_count  = session_count + 1,
+                    last_together  = excluded.last_together
+            """, (uid, pid, overlap, ended_at_str))
 
 
 def get_user_stats(user_id: int) -> Optional[dict]:
@@ -411,6 +516,115 @@ def get_leaderboard_for_game(game_name: str, limit: int = 10) -> tuple[str | Non
 
     results.sort(key=lambda x: x["total_seconds"], reverse=True)
     return matched, results[:limit]
+
+
+def get_accomplices(user_id: int, limit: int = 5) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT gp.partner_id, u.display_name,
+                  SUM(gp.shared_seconds) as total_seconds,
+                  SUM(gp.session_count) as session_count,
+                  MAX(gp.last_played) as last_played
+           FROM game_partners gp JOIN users u ON gp.partner_id = u.user_id
+           WHERE gp.user_id = ?
+           GROUP BY gp.partner_id ORDER BY total_seconds DESC LIMIT ?""",
+        (user_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_voice_crew(user_id: int, limit: int = 5) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT vp.partner_id, u.display_name,
+                  vp.shared_seconds as total_seconds,
+                  vp.session_count,
+                  vp.last_together
+           FROM voice_partners vp JOIN users u ON vp.partner_id = u.user_id
+           WHERE vp.user_id = ?
+           ORDER BY total_seconds DESC LIMIT ?""",
+        (user_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_weekly_leaderboard(category: str, limit: int = 10) -> list[dict]:
+    session_type_map = {"online": "online", "gaming": "gaming", "voice": "voice"}
+    session_type = session_type_map.get(category, "online")
+
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    week_start_str = week_start.isoformat()
+
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT s.user_id, u.display_name, s.started_at, s.ended_at
+           FROM sessions s JOIN users u ON s.user_id = u.user_id
+           WHERE s.session_type = ?
+             AND (s.ended_at IS NULL OR s.ended_at >= ?)""",
+        (session_type, week_start_str),
+    ).fetchall()
+
+    totals: dict[int, dict] = {}
+    for row in rows:
+        started = max(datetime.fromisoformat(row["started_at"]), week_start)
+        ended = datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else now
+        elapsed = max(0, int((ended - started).total_seconds()))
+        uid = row["user_id"]
+        if uid not in totals:
+            totals[uid] = {"display_name": row["display_name"], "score": 0}
+        totals[uid]["score"] += elapsed
+
+    results = [
+        {"user_id": uid, "display_name": v["display_name"], "score": v["score"]}
+        for uid, v in totals.items() if v["score"] > 0
+    ]
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:limit]
+
+
+def get_streaks(user_id: int) -> tuple[int, int]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT date FROM activity_days WHERE user_id=? ORDER BY date DESC",
+        (user_id,),
+    ).fetchall()
+    if not rows:
+        return 0, 0
+
+    dates = [r["date"] for r in rows]
+    today = datetime.now(timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_str = today.isoformat()
+
+    # Current streak
+    current = 0
+    if dates[0] in (today_str, yesterday):
+        prev = datetime.strptime(dates[0], "%Y-%m-%d").date()
+        current = 1
+        for d in dates[1:]:
+            curr_date = datetime.strptime(d, "%Y-%m-%d").date()
+            if (prev - curr_date).days == 1:
+                current += 1
+                prev = curr_date
+            else:
+                break
+
+    # Longest streak
+    longest = current
+    streak = 1
+    for i in range(1, len(dates)):
+        d1 = datetime.strptime(dates[i - 1], "%Y-%m-%d").date()
+        d2 = datetime.strptime(dates[i], "%Y-%m-%d").date()
+        if (d1 - d2).days == 1:
+            streak += 1
+            longest = max(longest, streak)
+        else:
+            streak = 1
+
+    return current, longest
 
 
 # --- Chat logging ---
