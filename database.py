@@ -626,15 +626,11 @@ def get_voice_crew(user_id: int, limit: int = 5) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_weekly_leaderboard(category: str, limit: int = 10) -> list[dict]:
-    session_type_map = {"online": "online", "gaming": "gaming", "voice": "voice"}
-    session_type = session_type_map.get(category, "online")
-
+def _period_leaderboard(category: str, period_start: datetime, limit: int) -> list[dict]:
+    """Shared logic for weekly and monthly leaderboards."""
+    session_type = {"online": "online", "gaming": "gaming", "voice": "voice"}.get(category, "online")
+    period_start_str = period_start.isoformat()
     now = datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    week_start_str = week_start.isoformat()
 
     conn = get_conn()
     rows = conn.execute(
@@ -642,12 +638,12 @@ def get_weekly_leaderboard(category: str, limit: int = 10) -> list[dict]:
            FROM sessions s JOIN users u ON s.user_id = u.user_id
            WHERE s.session_type = ?
              AND (s.ended_at IS NULL OR s.ended_at >= ?)""",
-        (session_type, week_start_str),
+        (session_type, period_start_str),
     ).fetchall()
 
     totals: dict[int, dict] = {}
     for row in rows:
-        started = max(datetime.fromisoformat(row["started_at"]), week_start)
+        started = max(datetime.fromisoformat(row["started_at"]), period_start)
         ended = datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else now
         elapsed = max(0, int((ended - started).total_seconds()))
         uid = row["user_id"]
@@ -661,6 +657,20 @@ def get_weekly_leaderboard(category: str, limit: int = 10) -> list[dict]:
     ]
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
+
+
+def get_weekly_leaderboard(category: str, limit: int = 10) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return _period_leaderboard(category, week_start, limit)
+
+
+def get_monthly_leaderboard(category: str, limit: int = 10) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return _period_leaderboard(category, month_start, limit)
 
 
 def get_streaks(user_id: int) -> tuple[int, int]:

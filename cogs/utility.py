@@ -10,9 +10,10 @@ USER_COMMANDS = """
 
 **Leaderboards**
 `!leaderboard [online|gaming|voice]` — This week's top 10
+`!leaderboard month [online|gaming|voice]` — This month's top 10
 `!leaderboard all [online|gaming|voice]` — All-time top 10
 `!leaderboard <game>` — Top players for a specific game
-`!weekly [online|gaming|voice]` — Same as !leaderboard
+`!weekly` / `!monthly` — Shortcuts for week/month views
 
 **Social**
 `!accomplices [@member]` — Top gaming partners
