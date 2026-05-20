@@ -18,10 +18,6 @@ ACHIEVEMENTS: dict[str, tuple[str, str, str]] = {
     "streak_3":     ("🔥",  "On a Roll",         "Achieve a 3-day activity streak"),
     "streak_7":     ("📅",  "Week Warrior",      "Achieve a 7-day activity streak"),
     "streak_30":    ("💫",  "Consistent",        "Achieve a 30-day activity streak"),
-    "games_5":      ("🃏",  "Jack of All Trades","Play 5 different games"),
-    "game_50h":     ("🎯",  "One-Trick Pony",    "Spend 50 hours in a single game"),
-    "partners_3":   ("🤝",  "Good Company",      "Play with 3 different people"),
-    "crew_3":       ("👥",  "Voice Regular",     "Share voice time with 3 different people"),
 }
 
 _local = threading.local()
@@ -330,19 +326,6 @@ def _check_and_award_achievements(conn: sqlite3.Connection, user_id: int) -> lis
     if not user:
         return []
 
-    game_count = conn.execute(
-        "SELECT COUNT(DISTINCT game_name) as c FROM game_stats WHERE user_id=?", (user_id,)
-    ).fetchone()["c"]
-    max_game_secs = conn.execute(
-        "SELECT COALESCE(MAX(total_seconds), 0) as m FROM game_stats WHERE user_id=?", (user_id,)
-    ).fetchone()["m"]
-    partner_count = conn.execute(
-        "SELECT COUNT(DISTINCT partner_id) as c FROM game_partners WHERE user_id=?", (user_id,)
-    ).fetchone()["c"]
-    crew_count = conn.execute(
-        "SELECT COUNT(DISTINCT partner_id) as c FROM voice_partners WHERE user_id=?", (user_id,)
-    ).fetchone()["c"]
-
     # Streak uses the same connection so uncommitted activity_days rows are visible
     current_streak, longest_streak = get_streaks(user_id)
     best_streak = max(current_streak, longest_streak)
@@ -357,10 +340,6 @@ def _check_and_award_achievements(conn: sqlite3.Connection, user_id: int) -> lis
         "streak_3":    best_streak >= 3,
         "streak_7":    best_streak >= 7,
         "streak_30":   best_streak >= 30,
-        "games_5":     game_count >= 5,
-        "game_50h":    max_game_secs >= 180_000,
-        "partners_3":  partner_count >= 3,
-        "crew_3":      crew_count >= 3,
     }
 
     now = _now()
