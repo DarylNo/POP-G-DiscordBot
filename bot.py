@@ -85,8 +85,6 @@ class POPGBot(commands.Bot):
         whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
         if vl is None:
             checks.append(("⚠️", "Voice: VoiceListener cog not loaded"))
-        elif not getattr(__import__("cogs.voice_listener", fromlist=["_SINKS_AVAILABLE"]), "_SINKS_AVAILABLE", True):
-            checks.append(("❌", "Voice recording: `discord.sinks` unavailable — upgrade discord.py"))
         elif vl._model is None:
             checks.append(("⚠️", "Whisper: `openai-whisper` not installed — transcription disabled"))
         else:
