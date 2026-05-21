@@ -6,23 +6,43 @@ from cogs.profile import _fmt_duration, _guild_member
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
-_HOUR_LABELS = [
-    "12a", " 1a", " 2a", " 3a", " 4a", " 5a",
-    " 6a", " 7a", " 8a", " 9a", "10a", "11a",
-    "12p", " 1p", " 2p", " 3p", " 4p", " 5p",
-    " 6p", " 7p", " 8p", " 9p", "10p", "11p",
-]
+# Hour strip label line — positions align with the 24-char strip (one char per hour)
+_HOUR_STRIP_LABEL = "12a" + " " * 9 + "12p" + " " * 6 + "11p"
 _DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def _build_bars(counts: list[int], labels: list[str], width: int = 10) -> str:
-    max_val = max(counts) if any(counts) else 1
-    lines = []
-    for label, count in zip(labels, counts):
-        filled = round(count / max_val * width) if max_val else 0
-        bar = "█" * filled if filled else "·"
-        lines.append(f"{label} {bar}")
-    return "\n".join(lines)
+def _density(count: int, max_count: int) -> str:
+    """Map a count to a 5-level density character."""
+    if max_count == 0 or count == 0:
+        return "·"
+    pct = count / max_count
+    if pct <= 0.25:
+        return "░"
+    if pct <= 0.50:
+        return "▒"
+    if pct <= 0.75:
+        return "▓"
+    return "█"
+
+
+def _build_heatmap_block(hours: list[int], days: list[int]) -> str:
+    hour_max = max(hours) if any(hours) else 1
+    day_max = max(days) if any(days) else 1
+
+    strip = "".join(_density(h, hour_max) for h in hours)
+    day_lines = [
+        f"{label} {'█' * round(c / day_max * 12) if c else '·'}"
+        for label, c in zip(_DAY_LABELS, days)
+    ]
+
+    return (
+        f"Hour of Day (UTC)\n"
+        f"{_HOUR_STRIP_LABEL}\n"
+        f"{strip}\n"
+        f"\n"
+        f"Day of Week\n"
+        + "\n".join(day_lines)
+    )
 
 
 class Social(commands.Cog):
@@ -170,12 +190,9 @@ class Social(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        hour_chart = _build_bars(data["hours"], _HOUR_LABELS)
-        day_chart = _build_bars(data["days"], _DAY_LABELS)
-
-        embed.add_field(name="By Hour (UTC)", value=f"```{hour_chart}```", inline=True)
-        embed.add_field(name="By Day", value=f"```{day_chart}```", inline=True)
-        embed.set_footer(text=f"Past our Prime Gamers · Based on {data['total']} sessions")
+        block = _build_heatmap_block(data["hours"], data["days"])
+        embed.description = f"```{block}```"
+        embed.set_footer(text=f"Based on {data['total']} sessions · · none  ░▒▓█ low→peak · Past our Prime Gamers")
         await ctx.send(embed=embed)
 
     @heatmap.error
