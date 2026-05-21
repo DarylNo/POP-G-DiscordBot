@@ -19,6 +19,7 @@ USER_COMMANDS = """
 `!accomplices [@member]` — Top gaming partners (who you play games with most)
 `!crew [@member]` — Top voice crew (who you hang out in voice with most)
 `!achievements [@member]` — Earned badges and locked ones still to unlock
+`!heatmap [@member]` — When they're usually online (by hour and day of week)
 
 **Other**
 `!ping` — Check bot latency

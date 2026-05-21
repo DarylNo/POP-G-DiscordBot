@@ -503,6 +503,32 @@ def get_top_games(limit: int = 5) -> list[dict]:
     return results[:limit]
 
 
+def get_activity_heatmap(user_id: int) -> dict:
+    """Return hour-of-day and day-of-week session counts for a user.
+
+    Uses online session start times as the activity signal.
+    Returns {"hours": [24 ints], "days": [7 ints], "total": int}
+    where days[0]=Monday and days[6]=Sunday.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' AND ended_at IS NOT NULL",
+        (user_id,),
+    ).fetchall()
+
+    hours = [0] * 24
+    days = [0] * 7
+    for row in rows:
+        try:
+            dt = datetime.fromisoformat(row["started_at"])
+            hours[dt.hour] += 1
+            days[dt.weekday()] += 1  # Monday=0, Sunday=6
+        except (ValueError, TypeError):
+            pass
+
+    return {"hours": hours, "days": days, "total": len(rows)}
+
+
 def get_active_sessions() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
