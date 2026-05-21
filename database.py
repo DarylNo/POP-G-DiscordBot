@@ -214,7 +214,7 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
 
     # Credit platform-specific column for online sessions
     if session_type == "online":
-        platform_col = "total_mobile_seconds" if row["platform"] == "mobile" else "total_desktop_seconds"
+        platform_col = "total_mobile_seconds" if (row["platform"] or "desktop") == "mobile" else "total_desktop_seconds"
         conn.execute(
             f"UPDATE users SET {platform_col}={platform_col}+? WHERE user_id=?",
             (elapsed, user_id),
@@ -267,7 +267,7 @@ def _update_game_partners(
 
     for partner in overlapping:
         b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"]) if partner["ended_at"] else datetime.now(timezone.utc)
+        b_end = datetime.fromisoformat(partner["ended_at"] if partner["ended_at"] else _now())
         overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
         if overlap <= 0:
             continue
@@ -300,7 +300,7 @@ def _update_voice_partners(
 
     for partner in overlapping:
         b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"]) if partner["ended_at"] else datetime.now(timezone.utc)
+        b_end = datetime.fromisoformat(partner["ended_at"] if partner["ended_at"] else _now())
         overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
         if overlap <= 0:
             continue
@@ -398,7 +398,7 @@ def get_user_stats(user_id: int) -> Optional[dict]:
             live_seconds = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
             stats[col] += live_seconds
             if session_type == "online":
-                platform_col = "total_mobile_seconds" if active["platform"] == "mobile" else "total_desktop_seconds"
+                platform_col = "total_mobile_seconds" if (active["platform"] or "desktop") == "mobile" else "total_desktop_seconds"
                 stats[platform_col] = stats.get(platform_col, 0) + live_seconds
 
     # Inject active gaming session into top_games if not yet committed to game_stats
@@ -492,7 +492,7 @@ def get_top_games(limit: int = 5) -> list[dict]:
         elapsed = max(0, int((now - started).total_seconds()))
         name = s["game_name"]
         totals[name] = totals.get(name, 0) + elapsed
-        counts[name] = counts.get(name, 0)
+        counts[name] = counts.get(name, 0) + 1
 
     results = [
         {"game_name": name, "total_seconds": secs, "session_count": counts.get(name, 0)}
