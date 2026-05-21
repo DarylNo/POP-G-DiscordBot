@@ -79,14 +79,16 @@ class POPGBot(commands.Bot):
         except Exception as e:
             checks.append(("❌", f"Database: {e}"))
 
-        # Whisper
+        # Voice recording + Whisper
         vl = self.cogs.get("VoiceListener")
         whisper_model = os.getenv("WHISPER_MODEL", "small")
         whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
         if vl is None:
-            checks.append(("⚠️", "Whisper: VoiceListener cog not loaded"))
+            checks.append(("⚠️", "Voice: VoiceListener cog not loaded"))
+        elif not getattr(__import__("cogs.voice_listener", fromlist=["_SINKS_AVAILABLE"]), "_SINKS_AVAILABLE", True):
+            checks.append(("❌", "Voice recording: `discord.sinks` unavailable — upgrade discord.py"))
         elif vl._model is None:
-            checks.append(("⚠️", "Whisper: `openai-whisper` not installed — voice transcription disabled"))
+            checks.append(("⚠️", "Whisper: `openai-whisper` not installed — transcription disabled"))
         else:
             checks.append(("✅", f"Whisper: `{whisper_model}` model loaded on `{whisper_device}`"))
 
