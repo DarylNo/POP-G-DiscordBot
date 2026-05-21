@@ -117,6 +117,25 @@ def init_db() -> None:
             earned_at      TEXT    NOT NULL,
             PRIMARY KEY (user_id, achievement_id)
         );
+
+        CREATE TABLE IF NOT EXISTS voice_transcripts (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id   INTEGER NOT NULL,
+            channel_name TEXT    NOT NULL,
+            started_at   TEXT    NOT NULL,
+            ended_at     TEXT,
+            status       TEXT    NOT NULL DEFAULT 'recording',
+            summary      TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS transcript_segments (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   INTEGER NOT NULL REFERENCES voice_transcripts(id),
+            user_id      INTEGER NOT NULL,
+            display_name TEXT    NOT NULL,
+            timestamp    REAL    NOT NULL,
+            text         TEXT    NOT NULL
+        );
     """)
     # Migrations for existing databases
     for migration in [
@@ -795,3 +814,85 @@ def get_recent_messages(channel_id: int, limit: int = 100) -> list[dict]:
 def get_messages_for_llm(channel_id: int, limit: int = 200) -> list[dict]:
     """Return messages as plain dicts ready to serialize into an LLM prompt."""
     return get_recent_messages(channel_id, limit)
+
+
+# --- Voice transcription ---
+
+def open_transcript_session(channel_id: int, channel_name: str) -> int:
+    """Open a new recording session and return its id."""
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO voice_transcripts (channel_id, channel_name, started_at, status) VALUES (?, ?, ?, 'recording')",
+        (channel_id, channel_name, _now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def close_transcript_session(session_id: int) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET ended_at=?, status='processing' WHERE id=?",
+        (_now(), session_id),
+    )
+    conn.commit()
+
+
+def set_transcript_status(session_id: int, status: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET status=? WHERE id=?",
+        (status, session_id),
+    )
+    conn.commit()
+
+
+def set_transcript_summary(session_id: int, summary: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET summary=?, status='done' WHERE id=?",
+        (summary, session_id),
+    )
+    conn.commit()
+
+
+def add_transcript_segment(session_id: int, user_id: int, display_name: str, timestamp: float, text: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO transcript_segments (session_id, user_id, display_name, timestamp, text) VALUES (?, ?, ?, ?, ?)",
+        (session_id, user_id, display_name, timestamp, text),
+    )
+    conn.commit()
+
+
+def get_transcript_session(session_id: Optional[int] = None) -> Optional[dict]:
+    """Return a specific session by id, or the most recent one if session_id is None."""
+    conn = get_conn()
+    if session_id is not None:
+        row = conn.execute(
+            "SELECT * FROM voice_transcripts WHERE id=?", (session_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM voice_transcripts ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_transcript_segments(session_id: int) -> list[dict]:
+    """Return all segments for a session ordered by timestamp."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM transcript_segments WHERE session_id=? ORDER BY timestamp",
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_transcript_sessions(limit: int = 10) -> list[dict]:
+    """Return the most recent N sessions (summary, no segments)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM voice_transcripts ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
