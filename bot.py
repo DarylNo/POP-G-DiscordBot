@@ -121,24 +121,10 @@ class POPGBot(commands.Bot):
         except Exception as e:
             checks.append(("❌", f"Ollama: unreachable at `{ollama_url}` — {e}"))
 
-        # Log everything
         log.info("=== Startup Diagnostics ===")
         for icon, msg in checks:
             log.info("  %s %s", icon, msg)
         log.info("===========================")
-
-        # Post to Discord channel if configured
-        channel = self.get_channel(config.STARTUP_LOG_CHANNEL) if config.STARTUP_LOG_CHANNEL else None
-        if channel is None:
-            return
-
-        embed = discord.Embed(
-            title="POPG Bot — Startup Diagnostics",
-            color=discord.Color.green() if all(i == "✅" for i, _ in checks) else discord.Color.orange(),
-        )
-        embed.description = "\n".join(f"{icon} {msg}" for icon, msg in checks)
-        embed.set_footer(text=f"Logged in as {self.user}")
-        await channel.send(embed=embed)
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         # Unwrap CheckFailure wrappers from guild_only etc.
