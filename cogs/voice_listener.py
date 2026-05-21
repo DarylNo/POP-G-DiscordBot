@@ -47,12 +47,23 @@ class VoiceListener(commands.Cog):
     async def cog_load(self) -> None:
         if not _WHISPER_AVAILABLE:
             return
-        log.info("Loading Whisper '%s' on %s...", WHISPER_MODEL_NAME, WHISPER_DEVICE)
+        device = WHISPER_DEVICE
         loop = asyncio.get_event_loop()
-        self._model = await loop.run_in_executor(
-            None, lambda: _whisper.load_model(WHISPER_MODEL_NAME, device=WHISPER_DEVICE)
-        )
-        log.info("Whisper model ready.")
+        log.info("Loading Whisper '%s' on %s...", WHISPER_MODEL_NAME, device)
+        try:
+            self._model = await loop.run_in_executor(
+                None, lambda: _whisper.load_model(WHISPER_MODEL_NAME, device=device)
+            )
+            log.info("Whisper model ready on %s.", device)
+        except RuntimeError as e:
+            if device != "cpu" and "CUDA" in str(e):
+                log.warning("CUDA unavailable — falling back to CPU for Whisper (%s)", e)
+                self._model = await loop.run_in_executor(
+                    None, lambda: _whisper.load_model(WHISPER_MODEL_NAME, device="cpu")
+                )
+                log.info("Whisper model ready on CPU (fallback).")
+            else:
+                log.exception("Failed to load Whisper model: %s", e)
 
     @commands.command(name="join")
     async def join(self, ctx: commands.Context, channel: Optional[discord.VoiceChannel] = None) -> None:
