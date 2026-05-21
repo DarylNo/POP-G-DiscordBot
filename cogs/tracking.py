@@ -21,7 +21,38 @@ def _get_game(member: discord.Member) -> Optional[str]:
 
 
 def _is_online(status: discord.Status) -> bool:
-    return status in (discord.Status.online, discord.Status.idle, discord.Status.dnd)
+    return status in (discord.Status.online, discord.Status.dnd)
+
+
+def _get_platform(member: discord.Member) -> str:
+    """Detect the platform the member is actively using.
+
+    Uses per-platform status to distinguish: if desktop is idle but mobile
+    is online, they're on their phone. Desktop priority only applies when
+    both platforms show the same level of activity.
+    """
+    desktop_online = member.desktop_status == discord.Status.online or member.web_status == discord.Status.online
+    mobile_online  = member.mobile_status  == discord.Status.online
+    desktop_dnd    = member.desktop_status == discord.Status.dnd    or member.web_status == discord.Status.dnd
+    mobile_dnd     = member.mobile_status  == discord.Status.dnd
+
+    # One platform is clearly active (online), the other is not
+    if desktop_online and not mobile_online:
+        return "desktop"
+    if mobile_online and not desktop_online:
+        return "mobile"
+
+    # Both are online — fall back to desktop priority
+    if desktop_online and mobile_online:
+        return "desktop"
+
+    # Neither is 'online'; check dnd
+    if desktop_dnd and not mobile_dnd:
+        return "desktop"
+    if mobile_dnd and not desktop_dnd:
+        return "mobile"
+
+    return "desktop"  # last resort fallback
 
 
 class Tracking(commands.Cog):
@@ -45,7 +76,7 @@ class Tracking(commands.Cog):
         # Close any sessions the DB thinks are still open (stale from last run)
         stale = database.get_active_sessions()
         for s in stale:
-            database.close_session(s["user_id"], s["session_type"])
+            database.close_session(s["user_id"], s["session_type"], stale=True)
         if stale:
             log.info("Closed %d stale sessions from previous run", len(stale))
 
@@ -55,14 +86,18 @@ class Tracking(commands.Cog):
                 continue
             self._ensure_user(member)
 
-            if _is_online(member.status):
-                database.open_session(member.id, "online")
-
             game = _get_game(member)
+            in_voice = member.voice and member.voice.channel
+
+            # Open online session if online/dnd, OR if actively gaming/in voice
+            # (you can't be gaming or in voice while truly offline)
+            if _is_online(member.status) or game or in_voice:
+                database.open_session(member.id, "online", platform=_get_platform(member))
+
             if game:
                 database.open_session(member.id, "gaming", game_name=game)
 
-            if member.voice and member.voice.channel:
+            if in_voice:
                 database.open_session(member.id, "voice", voice_channel_id=member.voice.channel.id)
 
         log.info("Presence recovery complete for guild %s", guild.name)
@@ -84,8 +119,8 @@ class Tracking(commands.Cog):
         now_online = _is_online(after.status)
 
         if not was_online and now_online:
-            database.open_session(after.id, "online")
-            log.debug("%s came online", after.display_name)
+            database.open_session(after.id, "online", platform=_get_platform(after))
+            log.debug("%s came online (%s)", after.display_name, _get_platform(after))
         elif was_online and not now_online:
             elapsed = database.close_session(after.id, "online")
             log.debug("%s went offline (online for %ss)", after.display_name, elapsed)
