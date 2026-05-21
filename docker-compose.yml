@@ -11,6 +11,7 @@ services:
       - WHISPER_DEVICE=cuda
     volumes:
       - ./data:/app/data
+      - ./data/whisper-cache:/root/.cache/whisper
     deploy:
       resources:
         reservations:
