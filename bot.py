@@ -32,6 +32,7 @@ COGS = [
     "cogs.chat_logger",
     "cogs.utility",
     "cogs.social",
+    "cogs.voice_listener",
 ]
 
 
