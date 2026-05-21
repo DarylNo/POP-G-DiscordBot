@@ -6,6 +6,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 PREFIX = os.getenv("PREFIX", "!")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+STARTUP_LOG_CHANNEL = int(os.getenv("STARTUP_LOG_CHANNEL", "0")) or None
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is not set in .env")
