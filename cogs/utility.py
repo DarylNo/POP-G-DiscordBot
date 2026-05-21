@@ -21,9 +21,20 @@ USER_COMMANDS = """
 `!achievements [@member]` — Earned badges and locked ones still to unlock
 `!heatmap [@member]` — When they're usually online (by hour and day of week)
 
+**Voice Recap**
+`!recap [id]` — LLM summary of last (or specific) voice session
+`!transcript [id]` — Full attributed transcript with timestamps
+`!sessions` — List recent voice recording sessions
+
 **Other**
 `!ping` — Check bot latency
 `!help` — Show this message
+""".strip()
+
+ADMIN_VOICE_COMMANDS = """
+**Voice Recording (Admin)**
+`!join [#channel]` — Bot joins voice and starts recording
+`!leave` — Stop recording and process transcript + summary
 """.strip()
 
 ADMIN_COMMANDS = """
@@ -59,6 +70,7 @@ class Utility(commands.Cog):
         )
         if ctx.guild and _is_admin(ctx):
             embed.add_field(name="​", value=ADMIN_COMMANDS, inline=False)
+            embed.add_field(name="​", value=ADMIN_VOICE_COMMANDS, inline=False)
         embed.set_footer(text="Past our Prime Gamers")
         await ctx.send(embed=embed)
 

@@ -33,6 +33,7 @@ COGS = [
     "cogs.utility",
     "cogs.social",
     "cogs.voice_listener",
+    "cogs.llm",
 ]
 
 
