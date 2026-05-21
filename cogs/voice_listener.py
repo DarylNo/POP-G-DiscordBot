@@ -6,17 +6,7 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
-
-try:
-    from discord.sinks import WaveSink
-    _SINKS_AVAILABLE = True
-except ImportError:
-    WaveSink = None
-    _SINKS_AVAILABLE = False
-    logging.getLogger("popg.voice_listener").warning(
-        "discord.sinks not available — voice recording disabled. "
-        "Upgrade discord.py or install from git."
-    )
+from discord.sinks import WaveSink
 
 import database
 from cogs.admin import _is_admin
@@ -69,9 +59,6 @@ class VoiceListener(commands.Cog):
         """Join a voice channel and start recording. Defaults to your current channel."""
         if not _is_admin(ctx):
             await ctx.send("Admin only.")
-            return
-        if not _SINKS_AVAILABLE:
-            await ctx.send("Voice recording unavailable — `discord.sinks` not found in this discord.py build.")
             return
         if not _WHISPER_AVAILABLE or self._model is None:
             await ctx.send("Voice transcription unavailable — `openai-whisper` is not installed.")
