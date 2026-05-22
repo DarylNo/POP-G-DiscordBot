@@ -25,6 +25,7 @@ _file = RotatingFileHandler(
 )
 _file.setFormatter(_fmt)
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
+logging.getLogger("discord.voice.receive.reader").setLevel(logging.WARNING)
 log = logging.getLogger("popg")
 
 COGS = [
