@@ -63,6 +63,16 @@ class POPGBot(commands.Bot):
         )
         await self._run_startup_diagnostics(guild)
 
+    async def on_message(self, message: discord.Message) -> None:
+        # Explicit handler ensures prefix commands are processed under py-cord
+        # (commands.Bot inherits from discord.Bot, whose on_message does not call
+        # process_commands).
+        if message.author.bot:
+            return
+        if message.content.startswith(config.PREFIX):
+            log.info("Command from %s: %s", message.author, message.content[:80])
+        await self.process_commands(message)
+
     async def _run_startup_diagnostics(self, guild: discord.Guild) -> None:
         checks: list[tuple[str, str]] = []
 
