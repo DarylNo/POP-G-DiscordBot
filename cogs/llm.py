@@ -15,7 +15,7 @@ log = logging.getLogger("popg.llm")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 
 _SUMMARY_PROMPT = """\
 You are summarizing a voice chat session from a Discord gaming server called "Past our Prime Gamers" (POPG). \
@@ -128,7 +128,28 @@ class LLM(commands.Cog):
             await ctx.send(f"Session #{sid} is still being processed — check back in a moment.")
             return
         if status == "failed":
-            await ctx.send(f"Session #{sid} failed to process. Use `!transcript {sid}` to see raw segments if any were captured.")
+            segments = database.get_transcript_segments(sid)
+            if not segments:
+                await ctx.send(f"Session #{sid} failed and has no transcript data.")
+                return
+            await ctx.send(f"Session #{sid} previously failed — retrying summary ({len(segments)} segments, may take a few minutes)...")
+            transcript_text = _build_transcript_text(segments)
+            prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
+            try:
+                summary = await _ollama_generate(prompt)
+            except Exception:
+                log.exception("Ollama retry failed for session %d", sid)
+                await ctx.send(f"Summary generation failed again. Use `!transcript {sid}` to read the raw transcript.")
+                return
+            database.set_transcript_summary(sid, summary)
+            started = session["started_at"][:16].replace("T", " ") + " UTC"
+            embed = discord.Embed(
+                title=f"Session #{sid} Recap — {session['channel_name']}",
+                description=summary,
+                color=discord.Color.blurple(),
+            )
+            embed.set_footer(text=f"Recorded {started} · !transcript {sid} for full text · Past our Prime Gamers")
+            await ctx.send(embed=embed)
             return
 
         summary = session.get("summary") or "_No summary available._"
