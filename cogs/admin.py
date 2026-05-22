@@ -127,5 +127,5 @@ class Admin(commands.Cog):
             await ctx.send("Please mention a member: `!admin reset @member`")
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Admin(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(Admin(bot))

@@ -201,5 +201,5 @@ class Leaderboard(commands.Cog):
         await ctx.send("Usage: `!monthly [online|gaming|voice]`")
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Leaderboard(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(Leaderboard(bot))

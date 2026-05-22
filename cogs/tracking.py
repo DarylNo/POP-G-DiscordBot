@@ -169,5 +169,5 @@ class Tracking(commands.Cog):
             log.debug("%s moved voice: %s → %s", member.display_name, before.channel.name, after.channel.name)
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Tracking(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(Tracking(bot))

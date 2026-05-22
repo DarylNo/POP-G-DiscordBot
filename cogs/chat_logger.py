@@ -141,5 +141,5 @@ class ChatLogger(commands.Cog):
             await ctx.send("Please specify a channel: `!log watch #channel-name`")
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(ChatLogger(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(ChatLogger(bot))

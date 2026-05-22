@@ -52,7 +52,7 @@ class POPGBot(commands.Bot):
         self._cog_errors: dict[str, str] = {}
         for cog in COGS:
             try:
-                await self.load_extension(cog)
+                self.load_extension(cog)
                 log.info("Loaded cog: %s", cog)
             except Exception as e:
                 log.exception("FAILED to load cog: %s", cog)

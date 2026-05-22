@@ -215,5 +215,5 @@ class LLM(commands.Cog):
             await ctx.send("Usage: `!transcript [session_id]`")
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(LLM(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(LLM(bot))
