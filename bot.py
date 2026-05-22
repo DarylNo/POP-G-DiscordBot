@@ -69,9 +69,16 @@ class POPGBot(commands.Bot):
         # process_commands).
         if message.author.bot:
             return
+        is_dm = message.guild is None
         if message.content.startswith(config.PREFIX):
-            log.info("Command from %s: %s", message.author, message.content[:80])
-        await self.process_commands(message)
+            log.info("Command from %s (DM=%s): %s", message.author, is_dm, message.content[:80])
+        elif is_dm:
+            log.info("DM from %s (no prefix): %r", message.author, message.content[:40])
+        try:
+            await self.process_commands(message)
+        except Exception:
+            log.exception("process_commands raised for message from %s (DM=%s): %r",
+                          message.author, is_dm, message.content[:80])
 
     async def _run_startup_diagnostics(self, guild: discord.Guild) -> None:
         checks: list[tuple[str, str]] = []
