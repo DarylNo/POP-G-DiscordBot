@@ -117,6 +117,25 @@ def init_db() -> None:
             earned_at      TEXT    NOT NULL,
             PRIMARY KEY (user_id, achievement_id)
         );
+
+        CREATE TABLE IF NOT EXISTS voice_transcripts (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id   INTEGER NOT NULL,
+            channel_name TEXT    NOT NULL,
+            started_at   TEXT    NOT NULL,
+            ended_at     TEXT,
+            status       TEXT    NOT NULL DEFAULT 'recording',
+            summary      TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS transcript_segments (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   INTEGER NOT NULL REFERENCES voice_transcripts(id),
+            user_id      INTEGER NOT NULL,
+            display_name TEXT    NOT NULL,
+            timestamp    REAL    NOT NULL,
+            text         TEXT    NOT NULL
+        );
     """)
     # Migrations for existing databases
     for migration in [
@@ -214,7 +233,7 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
 
     # Credit platform-specific column for online sessions
     if session_type == "online":
-        platform_col = "total_mobile_seconds" if row["platform"] == "mobile" else "total_desktop_seconds"
+        platform_col = "total_mobile_seconds" if (row["platform"] or "desktop") == "mobile" else "total_desktop_seconds"
         conn.execute(
             f"UPDATE users SET {platform_col}={platform_col}+? WHERE user_id=?",
             (elapsed, user_id),
@@ -267,7 +286,7 @@ def _update_game_partners(
 
     for partner in overlapping:
         b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"]) if partner["ended_at"] else datetime.now(timezone.utc)
+        b_end = datetime.fromisoformat(partner["ended_at"] if partner["ended_at"] else _now())
         overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
         if overlap <= 0:
             continue
@@ -300,7 +319,7 @@ def _update_voice_partners(
 
     for partner in overlapping:
         b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"]) if partner["ended_at"] else datetime.now(timezone.utc)
+        b_end = datetime.fromisoformat(partner["ended_at"] if partner["ended_at"] else _now())
         overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
         if overlap <= 0:
             continue
@@ -398,7 +417,7 @@ def get_user_stats(user_id: int) -> Optional[dict]:
             live_seconds = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
             stats[col] += live_seconds
             if session_type == "online":
-                platform_col = "total_mobile_seconds" if active["platform"] == "mobile" else "total_desktop_seconds"
+                platform_col = "total_mobile_seconds" if (active["platform"] or "desktop") == "mobile" else "total_desktop_seconds"
                 stats[platform_col] = stats.get(platform_col, 0) + live_seconds
 
     # Inject active gaming session into top_games if not yet committed to game_stats
@@ -492,7 +511,7 @@ def get_top_games(limit: int = 5) -> list[dict]:
         elapsed = max(0, int((now - started).total_seconds()))
         name = s["game_name"]
         totals[name] = totals.get(name, 0) + elapsed
-        counts[name] = counts.get(name, 0)
+        counts[name] = counts.get(name, 0) + 1
 
     results = [
         {"game_name": name, "total_seconds": secs, "session_count": counts.get(name, 0)}
@@ -501,6 +520,32 @@ def get_top_games(limit: int = 5) -> list[dict]:
     ]
     results.sort(key=lambda x: x["total_seconds"], reverse=True)
     return results[:limit]
+
+
+def get_activity_heatmap(user_id: int) -> dict:
+    """Return hour-of-day and day-of-week session counts for a user.
+
+    Uses online session start times as the activity signal.
+    Returns {"hours": [24 ints], "days": [7 ints], "total": int}
+    where days[0]=Monday and days[6]=Sunday.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' AND ended_at IS NOT NULL",
+        (user_id,),
+    ).fetchall()
+
+    hours = [0] * 24
+    days = [0] * 7
+    for row in rows:
+        try:
+            dt = datetime.fromisoformat(row["started_at"])
+            hours[dt.hour] += 1
+            days[dt.weekday()] += 1  # Monday=0, Sunday=6
+        except (ValueError, TypeError):
+            pass
+
+    return {"hours": hours, "days": days, "total": len(rows)}
 
 
 def get_active_sessions() -> list[dict]:
@@ -769,3 +814,85 @@ def get_recent_messages(channel_id: int, limit: int = 100) -> list[dict]:
 def get_messages_for_llm(channel_id: int, limit: int = 200) -> list[dict]:
     """Return messages as plain dicts ready to serialize into an LLM prompt."""
     return get_recent_messages(channel_id, limit)
+
+
+# --- Voice transcription ---
+
+def open_transcript_session(channel_id: int, channel_name: str) -> int:
+    """Open a new recording session and return its id."""
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO voice_transcripts (channel_id, channel_name, started_at, status) VALUES (?, ?, ?, 'recording')",
+        (channel_id, channel_name, _now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def close_transcript_session(session_id: int) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET ended_at=?, status='processing' WHERE id=?",
+        (_now(), session_id),
+    )
+    conn.commit()
+
+
+def set_transcript_status(session_id: int, status: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET status=? WHERE id=?",
+        (status, session_id),
+    )
+    conn.commit()
+
+
+def set_transcript_summary(session_id: int, summary: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET summary=?, status='done' WHERE id=?",
+        (summary, session_id),
+    )
+    conn.commit()
+
+
+def add_transcript_segment(session_id: int, user_id: int, display_name: str, timestamp: float, text: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO transcript_segments (session_id, user_id, display_name, timestamp, text) VALUES (?, ?, ?, ?, ?)",
+        (session_id, user_id, display_name, timestamp, text),
+    )
+    conn.commit()
+
+
+def get_transcript_session(session_id: Optional[int] = None) -> Optional[dict]:
+    """Return a specific session by id, or the most recent one if session_id is None."""
+    conn = get_conn()
+    if session_id is not None:
+        row = conn.execute(
+            "SELECT * FROM voice_transcripts WHERE id=?", (session_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM voice_transcripts ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_transcript_segments(session_id: int) -> list[dict]:
+    """Return all segments for a session ordered by timestamp."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM transcript_segments WHERE session_id=? ORDER BY timestamp",
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_transcript_sessions(limit: int = 10) -> list[dict]:
+    """Return the most recent N sessions (summary, no segments)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM voice_transcripts ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]

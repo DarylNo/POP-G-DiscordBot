@@ -9,6 +9,8 @@ import database
 
 log = logging.getLogger("popg.tracking")
 
+STALE_CAP = 4 * 3600  # max seconds credited to any session closed on bot restart
+
 
 def _get_game(member: discord.Member) -> Optional[str]:
     """Return the name of the game a member is currently playing, or None."""
@@ -76,7 +78,7 @@ class Tracking(commands.Cog):
         # Close any sessions the DB thinks are still open (stale from last run)
         stale = database.get_active_sessions()
         for s in stale:
-            database.close_session(s["user_id"], s["session_type"], stale=True)
+            database.close_session(s["user_id"], s["session_type"], cap_seconds=STALE_CAP, stale=True)
         if stale:
             log.info("Closed %d stale sessions from previous run", len(stale))
 
