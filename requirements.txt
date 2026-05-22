@@ -1,4 +1,4 @@
-py-cord>=2.6.0
+py-cord[voice]>=2.6.0
 python-dotenv>=1.0.0
 openai-whisper>=20231117
 torch>=2.0.0
