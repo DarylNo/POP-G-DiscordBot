@@ -91,7 +91,19 @@ class VoiceListener(commands.Cog):
 
         session_id = database.open_transcript_session(target.id, target.name)
         self._active[ctx.guild.id] = (vc, session_id, ctx.channel)
-        vc.start_recording(WaveSink(), self._recording_finished, ctx.guild.id)
+        try:
+            vc.start_recording(WaveSink(), self._recording_finished, ctx.guild.id)
+        except Exception as e:
+            self._active.pop(ctx.guild.id, None)
+            database.close_transcript_session(session_id)
+            await vc.disconnect()
+            log.exception("start_recording failed (likely DAVE E2E encryption incompatibility): %s", e)
+            await ctx.send(
+                "Voice recording failed to start. This is a known py-cord incompatibility "
+                "with Discord's DAVE E2E encryption protocol — see "
+                "https://github.com/Pycord-Development/pycord/issues/3139"
+            )
+            return
         await ctx.send(f"Recording started in **{target.name}**. Use `!leave` to stop.")
 
     @commands.command(name="leave")
