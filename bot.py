@@ -47,7 +47,6 @@ class POPGBot(commands.Bot):
 
         super().__init__(command_prefix=config.PREFIX, intents=intents, help_command=None)
 
-    async def setup_hook(self) -> None:
         database.init_db()
         self._cog_errors: dict[str, str] = {}
         for cog in COGS:
