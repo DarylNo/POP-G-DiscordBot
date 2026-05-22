@@ -148,6 +148,7 @@ class POPGBot(commands.Bot):
         error = getattr(error, "original", error)
 
         if isinstance(error, commands.CommandNotFound):
+            log.info("CommandNotFound (DM=%s): %r", ctx.guild is None, ctx.invoked_with)
             return  # Ignore silently — avoids noise from other bots' prefixes
 
         if isinstance(error, commands.NoPrivateMessage):
