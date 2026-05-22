@@ -144,7 +144,12 @@ class VoiceListener(commands.Cog):
         all_segments: list[tuple[float, int, str, str]] = []
 
         for user_id, audio_data in sink.audio_data.items():
-            member = guild.get_member(user_id) if guild else None
+            # py-cord dev branch keys audio_data by Member objects; released builds use int
+            if isinstance(user_id, discord.Member):
+                member = user_id
+                user_id = member.id
+            else:
+                member = guild.get_member(user_id) if guild else None
             display_name = member.display_name if member else str(user_id)
 
             audio_data.file.seek(0)
