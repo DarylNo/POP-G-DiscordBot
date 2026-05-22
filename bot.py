@@ -50,11 +50,15 @@ class POPGBot(commands.Bot):
     async def setup_hook(self) -> None:
         database.init_db()
         for cog in COGS:
-            await self.load_extension(cog)
-            log.info("Loaded cog: %s", cog)
+            try:
+                await self.load_extension(cog)
+                log.info("Loaded cog: %s", cog)
+            except Exception:
+                log.exception("FAILED to load cog: %s", cog)
 
     async def on_ready(self) -> None:
         log.info("POPG Bot ready — logged in as %s (id=%s)", self.user, self.user.id)
+        log.info("Registered commands: %s", sorted(self.all_commands.keys()))
         guild = self.get_guild(config.GUILD_ID)
         if guild is None:
             log.warning("Guild %s not found. Check GUILD_ID in .env", config.GUILD_ID)
