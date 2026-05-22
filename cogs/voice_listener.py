@@ -44,19 +44,19 @@ class VoiceListener(commands.Cog):
         # guild_id -> (voice_client, session_id, notify_channel)
         self._active: dict[int, tuple[discord.VoiceClient, int, discord.TextChannel]] = {}
 
-    async def cog_load(self) -> None:
-        if not _WHISPER_AVAILABLE:
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if not _WHISPER_AVAILABLE or self._model is not None:
             return
-        device = WHISPER_DEVICE
         loop = asyncio.get_event_loop()
-        log.info("Loading Whisper '%s' on %s...", WHISPER_MODEL_NAME, device)
+        log.info("Loading Whisper '%s' on %s...", WHISPER_MODEL_NAME, WHISPER_DEVICE)
         try:
             self._model = await loop.run_in_executor(
-                None, lambda: _whisper.load_model(WHISPER_MODEL_NAME, device=device)
+                None, lambda: _whisper.load_model(WHISPER_MODEL_NAME, device=WHISPER_DEVICE)
             )
-            log.info("Whisper model ready on %s.", device)
+            log.info("Whisper model ready on %s.", WHISPER_DEVICE)
         except RuntimeError as e:
-            if device != "cpu" and "CUDA" in str(e):
+            if WHISPER_DEVICE != "cpu" and "CUDA" in str(e):
                 log.warning("CUDA unavailable — falling back to CPU for Whisper (%s)", e)
                 self._model = await loop.run_in_executor(
                     None, lambda: _whisper.load_model(WHISPER_MODEL_NAME, device="cpu")

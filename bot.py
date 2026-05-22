@@ -11,7 +11,7 @@ from discord.ext import commands
 import config
 import database
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # --- Logging: console + rotating file ---
 _data_dir = os.getenv("DATA_DIR", ".")
@@ -114,7 +114,11 @@ class POPGBot(commands.Bot):
         if vl is None:
             checks.append(("⚠️", "Voice: VoiceListener cog not loaded"))
         elif vl._model is None:
-            checks.append(("⚠️", "Whisper: `openai-whisper` not installed — transcription disabled"))
+            from cogs.voice_listener import _WHISPER_AVAILABLE
+            if not _WHISPER_AVAILABLE:
+                checks.append(("⚠️", "Whisper: `openai-whisper` not installed — transcription disabled"))
+            else:
+                checks.append(("⚠️", f"Whisper: model still loading on `{whisper_device}`..."))
         else:
             checks.append(("✅", f"Whisper: `{whisper_model}` model loaded on `{whisper_device}`"))
 
