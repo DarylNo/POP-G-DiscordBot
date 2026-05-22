@@ -15,6 +15,7 @@ log = logging.getLogger("popg.llm")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 
 _SUMMARY_PROMPT = """\
 You are summarizing a voice chat session from a Discord gaming server called "Past our Prime Gamers" (POPG). \
@@ -64,7 +65,7 @@ async def _ollama_generate(prompt: str) -> str:
         resp = await session.post(
             f"{OLLAMA_URL}/api/generate",
             json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=aiohttp.ClientTimeout(total=120),
+            timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
         resp.raise_for_status()
         data = await resp.json()
