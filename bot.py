@@ -11,7 +11,7 @@ from discord.ext import commands
 import config
 import database
 
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 
 # --- Logging: console + rotating file ---
 _data_dir = os.getenv("DATA_DIR", ".")
@@ -26,6 +26,7 @@ _file = RotatingFileHandler(
 _file.setFormatter(_fmt)
 logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 logging.getLogger("discord.voice.receive.reader").setLevel(logging.WARNING)
+logging.getLogger("discord.opus").setLevel(logging.ERROR)
 log = logging.getLogger("popg")
 
 COGS = [
