@@ -49,12 +49,14 @@ class POPGBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         database.init_db()
+        self._cog_errors: dict[str, str] = {}
         for cog in COGS:
             try:
                 await self.load_extension(cog)
                 log.info("Loaded cog: %s", cog)
-            except Exception:
+            except Exception as e:
                 log.exception("FAILED to load cog: %s", cog)
+                self._cog_errors[cog] = f"{type(e).__name__}: {e}"
 
     async def on_ready(self) -> None:
         log.info("POPG Bot ready — logged in as %s (id=%s)", self.user, self.user.id)
@@ -86,6 +88,10 @@ class POPGBot(commands.Bot):
 
     async def _run_startup_diagnostics(self, guild: discord.Guild) -> None:
         checks: list[tuple[str, str]] = []
+
+        # Cog load errors (shown first so they're not scrolled off)
+        for cog, err in getattr(self, "_cog_errors", {}).items():
+            checks.append(("❌", f"Cog load FAILED — {cog}: {err}"))
 
         # Guild
         if guild:
