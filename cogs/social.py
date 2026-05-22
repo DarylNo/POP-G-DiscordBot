@@ -184,5 +184,5 @@ class Social(commands.Cog):
             await ctx.send("Could not find that member. Try mentioning them with @.")
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Social(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(Social(bot))

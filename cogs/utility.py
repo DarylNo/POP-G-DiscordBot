@@ -84,5 +84,5 @@ class Utility(commands.Cog):
             log.exception("help ctx.send failed for %s: %s", ctx.author, e)
 
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Utility(bot))
+def setup(bot: commands.Bot) -> None:
+    bot.add_cog(Utility(bot))
