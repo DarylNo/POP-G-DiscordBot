@@ -1,7 +1,11 @@
+import logging
+
 import discord
 from discord.ext import commands
 
 from cogs.admin import _is_admin
+
+log = logging.getLogger("popg.utility")
 
 USER_COMMANDS = """
 **Stats**
@@ -63,6 +67,7 @@ class Utility(commands.Cog):
     @commands.command(name="help", aliases=["commands"])
     async def help(self, ctx: commands.Context) -> None:
         """Show all available commands."""
+        log.info("help invoked by %s (DM=%s)", ctx.author, ctx.guild is None)
         embed = discord.Embed(
             title="POPG Bot Commands",
             description=USER_COMMANDS,
@@ -72,7 +77,11 @@ class Utility(commands.Cog):
             embed.add_field(name="​", value=ADMIN_COMMANDS, inline=False)
             embed.add_field(name="​", value=ADMIN_VOICE_COMMANDS, inline=False)
         embed.set_footer(text="Past our Prime Gamers")
-        await ctx.send(embed=embed)
+        try:
+            await ctx.send(embed=embed)
+            log.info("help sent ok to %s (DM=%s)", ctx.author, ctx.guild is None)
+        except Exception as e:
+            log.exception("help ctx.send failed for %s: %s", ctx.author, e)
 
 
 async def setup(bot: commands.Bot) -> None:
