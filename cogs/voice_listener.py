@@ -31,7 +31,11 @@ def _transcribe(model, audio_bytes: bytes) -> list[dict]:
         f.write(audio_bytes)
         tmp_path = f.name
     try:
-        result = model.transcribe(tmp_path)
+        result = model.transcribe(
+            tmp_path,
+            language="en",
+            initial_prompt="Gaming session on Discord server 'Past our Prime Gamers'. Players discussing video games, strategies, and casual conversation.",
+        )
         return result.get("segments", [])
     finally:
         os.unlink(tmp_path)
