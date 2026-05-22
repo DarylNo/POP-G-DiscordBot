@@ -11,6 +11,8 @@ from discord.ext import commands
 import config
 import database
 
+VERSION = "1.1.0"
+
 # --- Logging: console + rotating file ---
 _data_dir = os.getenv("DATA_DIR", ".")
 os.makedirs(_data_dir, exist_ok=True)
@@ -58,7 +60,7 @@ class POPGBot(commands.Bot):
                 self._cog_errors[cog] = f"{type(e).__name__}: {e}"
 
     async def on_ready(self) -> None:
-        log.info("POPG Bot ready — logged in as %s (id=%s)", self.user, self.user.id)
+        log.info("POPG Bot v%s ready — logged in as %s (id=%s)", VERSION, self.user, self.user.id)
         log.info("Registered commands: %s", sorted(self.all_commands.keys()))
         guild = self.get_guild(config.GUILD_ID)
         if guild is None:
