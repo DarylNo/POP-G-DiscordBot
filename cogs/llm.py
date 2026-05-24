@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from collections import defaultdict
 from datetime import datetime, timezone
 
 import aiohttp
@@ -27,6 +28,17 @@ notable moments or jokes. Keep it under 200 words and match the casual tone of t
 TRANSCRIPT:
 {transcript}"""
 
+_ROAST_PROMPT = """\
+You are the roast master for "Past our Prime Gamers" (POPG), a Discord server of older casual gamers.
+Based on what each person actually said in this voice chat, write a savage-but-friendly roast for each speaker.
+Think group chat energy — the kind of thing you'd say to a mate's face. Keep each roast to 2-3 sentences.
+
+WHAT EACH PERSON SAID:
+{per_speaker}
+
+Write one roast per person. Format exactly like this (one per line, no extra text before or after):
+**[Name]**: [roast]"""
+
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
 
 
@@ -36,6 +48,21 @@ def _fmt_timestamp(seconds: float) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+def _build_per_speaker_text(segments: list[dict], max_quotes: int = 12) -> str:
+    quotes: dict[str, list[str]] = defaultdict(list)
+    for seg in segments:
+        quotes[seg["display_name"]].append(seg["text"])
+    lines = []
+    for name, texts in quotes.items():
+        if len(texts) > max_quotes:
+            step = max(1, len(texts) // max_quotes)
+            texts = texts[::step][:max_quotes]
+        lines.append(f"{name}:")
+        for t in texts:
+            lines.append(f"  - {t}")
+    return "\n".join(lines)
 
 
 def _build_transcript_text(segments: list[dict]) -> str:
@@ -225,6 +252,58 @@ class LLM(commands.Cog):
         )
         embed.set_footer(text="!recap <id> · !transcript <id> · Past our Prime Gamers")
         await ctx.send(embed=embed)
+
+    @commands.cooldown(1, 30, commands.BucketType.guild)
+    @commands.command(name="roast")
+    async def roast(self, ctx: commands.Context, session_id: int = None) -> None:
+        """Have the LLM roast each member based on their voice chat transcript."""
+        session = database.get_transcript_session(session_id)
+        if session is None:
+            await ctx.send("No voice sessions recorded yet." if session_id is None else f"Session #{session_id} not found.")
+            return
+
+        sid = session["id"]
+        status = session["status"]
+
+        if status == "recording":
+            await ctx.send(f"Session #{sid} is still recording.")
+            return
+        if status in ("processing", "failed") or not session.get("summary"):
+            segments = database.get_transcript_segments(sid)
+            if not segments:
+                await ctx.send(f"Session #{sid} has no transcript data to roast.")
+                return
+        else:
+            segments = database.get_transcript_segments(sid)
+            if not segments:
+                await ctx.send(f"Session #{sid} has no transcript data to roast.")
+                return
+
+        await ctx.send(f"Roasting session #{sid}... 🔥 this may take a moment.")
+
+        per_speaker = _build_per_speaker_text(segments)
+        prompt = _ROAST_PROMPT.format(per_speaker=per_speaker)
+
+        try:
+            roast_text = await _ollama_generate(prompt)
+        except Exception:
+            log.exception("Ollama roast failed for session %d", sid)
+            await ctx.send(f"Roast failed. Judge them yourself with `!transcript {sid}`.")
+            return
+
+        started = session["started_at"][:16].replace("T", " ") + " UTC"
+        embed = discord.Embed(
+            title=f"🔥 Session #{sid} Roast — {session['channel_name']}",
+            description=roast_text,
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text=f"Recorded {started} · Past our Prime Gamers")
+        await ctx.send(embed=embed)
+
+    @roast.error
+    async def roast_error(self, ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.BadArgument):
+            await ctx.send("Usage: `!roast [session_id]`")
 
     @recap.error
     async def recap_error(self, ctx: commands.Context, error: Exception) -> None:
