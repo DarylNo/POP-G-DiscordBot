@@ -133,15 +133,8 @@ class VoiceListener(commands.Cog):
 
         if not sink.audio_data:
             database.set_transcript_status(session_id, "failed")
-            if notify_channel:
-                await notify_channel.send("No audio captured — transcript cancelled.")
+            log.warning("Session %d: no audio captured.", session_id)
             return
-
-        if notify_channel:
-            await notify_channel.send(
-                f"Recording stopped ({len(sink.audio_data)} speaker(s)). "
-                "Transcribing — this may take a minute..."
-            )
 
         guild = self.bot.get_guild(guild_id)
         loop = asyncio.get_event_loop()
@@ -178,17 +171,11 @@ class VoiceListener(commands.Cog):
 
         if not all_segments:
             database.set_transcript_status(session_id, "failed")
-            if notify_channel:
-                await notify_channel.send("No speech detected — transcript empty.")
+            log.warning("Session %d: no speech detected.", session_id)
             return
 
         database.set_transcript_status(session_id, "processing")
-
-        if notify_channel:
-            await notify_channel.send(
-                f"Transcription done — **{len(all_segments)} segments** saved (session #{session_id}). "
-                "Generating summary... use `!recap` once it's ready."
-            )
+        log.info("Session %d: %d segments saved, dispatching transcript_ready.", session_id, len(all_segments))
 
         # Dispatch event so the LLM cog can pick it up
         self.bot.dispatch("transcript_ready", session_id, notify_channel)

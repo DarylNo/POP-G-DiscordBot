@@ -118,23 +118,10 @@ class LLM(commands.Cog):
         except Exception:
             log.exception("Ollama request failed for session %d", session_id)
             database.set_transcript_status(session_id, "failed")
-            if notify_channel:
-                await notify_channel.send(
-                    f"LLM summary failed for session #{session_id}. "
-                    "Use `!transcript` to read the raw transcript."
-                )
             return
 
         database.set_transcript_summary(session_id, summary)
-
-        if notify_channel:
-            embed = discord.Embed(
-                title=f"Session #{session_id} — Summary Ready",
-                description=summary,
-                color=discord.Color.blurple(),
-            )
-            embed.set_footer(text=f"Use !recap {session_id} or !transcript {session_id} · Past our Prime Gamers")
-            await notify_channel.send(embed=embed)
+        log.info("Session %d: summary stored — use !recap or !roast to view.", session_id)
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.command(name="recap")
