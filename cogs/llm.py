@@ -447,7 +447,12 @@ class LLM(commands.Cog):
             if not _is_admin(ctx):
                 await ctx.send("Admin only.")
                 return
-            users = database.get_all_users()
+            try:
+                users = database.get_all_users()
+            except Exception as e:
+                log.exception("!dossier all: failed to fetch users")
+                await ctx.send(f"Failed to fetch members from database: {e}")
+                return
             if not users:
                 await ctx.send("No members in the database yet.")
                 return
@@ -463,7 +468,10 @@ class LLM(commands.Cog):
             summary = f"Dossier update complete — {done} updated"
             if failed:
                 summary += f", {failed} failed (check logs)"
-            await status_msg.edit(content=summary)
+            try:
+                await status_msg.edit(content=summary)
+            except Exception:
+                await ctx.send(summary)
             return
 
         # Single member mode
@@ -503,6 +511,9 @@ class LLM(commands.Cog):
     async def dossier_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.BadArgument):
             await ctx.send("Usage: `!dossier [@member]`")
+        elif isinstance(error, commands.CommandInvokeError):
+            log.exception("!dossier unhandled error", exc_info=error.original)
+            await ctx.send(f"Error: `{error.original}`")
 
     @recap.error
     async def recap_error(self, ctx: commands.Context, error: Exception) -> None:
