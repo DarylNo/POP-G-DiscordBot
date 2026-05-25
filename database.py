@@ -136,6 +136,12 @@ def init_db() -> None:
             timestamp    REAL    NOT NULL,
             text         TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS member_dossiers (
+            user_id      INTEGER PRIMARY KEY REFERENCES users(user_id),
+            content      TEXT    NOT NULL DEFAULT '',
+            last_updated TEXT    NOT NULL
+        );
     """)
     # Migrations for existing databases
     for migration in [
@@ -894,5 +900,40 @@ def list_transcript_sessions(limit: int = 10) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM voice_transcripts ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Member dossiers ---
+
+def get_dossier(user_id: int) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT content, last_updated FROM member_dossiers WHERE user_id=?", (user_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_dossier(user_id: int, content: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO member_dossiers (user_id, content, last_updated)
+           VALUES (?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET content=excluded.content, last_updated=excluded.last_updated""",
+        (user_id, content, _now()),
+    )
+    conn.commit()
+
+
+def get_user_chat_messages(user_id: int, since: Optional[str] = None, limit: int = 200) -> list[dict]:
+    """Return chat messages for a user. If since is None, returns last 30 days."""
+    conn = get_conn()
+    if since is None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    else:
+        cutoff = since
+    rows = conn.execute(
+        "SELECT content, sent_at FROM chat_messages WHERE user_id=? AND sent_at > ? ORDER BY sent_at ASC LIMIT ?",
+        (user_id, cutoff, limit),
     ).fetchall()
     return [dict(r) for r in rows]
