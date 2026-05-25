@@ -439,7 +439,7 @@ class LLM(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.cooldown(1, 5, commands.BucketType.user)
-    @commands.command(name="dossier", aliases=["sheet"])
+    @commands.command(name="dossier", aliases=["sheet"], hidden=True)
     async def dossier(self, ctx: commands.Context, member: discord.Member = None) -> None:
         """Show the AI-generated character sheet for you or another member."""
         target = member or ctx.author
