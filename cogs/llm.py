@@ -440,19 +440,54 @@ class LLM(commands.Cog):
 
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="dossier", aliases=["sheet"], hidden=True)
-    async def dossier(self, ctx: commands.Context, member: discord.Member = None) -> None:
-        """Show the AI-generated character sheet for you or another member."""
-        target = member or ctx.author
-        row = database.get_dossier(target.id)
+    async def dossier(self, ctx: commands.Context, *, target: str = None) -> None:
+        """Show the AI-generated character sheet for you, another member, or all members (admin: all)."""
+        # Admin bulk mode: !dossier all
+        if target and target.lower() == "all":
+            if not _is_admin(ctx):
+                await ctx.send("Admin only.")
+                return
+            users = database.get_all_users()
+            if not users:
+                await ctx.send("No members in the database yet.")
+                return
+            status_msg = await ctx.send(f"Updating dossiers for {len(users)} member(s)... 📋")
+            done, failed = 0, 0
+            for user in users:
+                try:
+                    await _update_member_dossier(user["user_id"], user["display_name"], session_quotes=[])
+                    done += 1
+                except Exception:
+                    log.exception("Bulk dossier update failed for user %d", user["user_id"])
+                    failed += 1
+            summary = f"Dossier update complete — {done} updated"
+            if failed:
+                summary += f", {failed} failed (check logs)"
+            await status_msg.edit(content=summary)
+            return
+
+        # Single member mode
+        if target:
+            # Try to resolve as a Member mention/name
+            try:
+                converter = commands.MemberConverter()
+                member = await converter.convert(ctx, target)
+            except commands.BadArgument:
+                await ctx.send(f"Member `{target}` not found.")
+                return
+        else:
+            member = ctx.author
+
+        row = database.get_dossier(member.id)
         if not row:
             await ctx.send(
-                f"No dossier yet for **{target.display_name}** — "
+                f"No dossier yet for **{member.display_name}** — "
                 "participate in a recorded voice session or chat in a watched channel to start building one."
             )
             return
         updated = row["last_updated"][:16].replace("T", " ") + " UTC"
         embed = discord.Embed(
-            title=f"📋 {target.display_name} — POPG Dossier",
+            title=f"📋 {member.display_name} — POPG Dossier",
             description=row["content"],
             color=discord.Color.green(),
         )
