@@ -444,7 +444,8 @@ class LLM(commands.Cog):
         """Show the AI-generated character sheet for you, another member, or all members (admin: all)."""
         # Admin bulk mode: !dossier all
         if target and target.lower() == "all":
-            if not _is_admin(ctx):
+            is_admin = await self.bot.is_owner(ctx.author) if ctx.guild is None else _is_admin(ctx)
+            if not is_admin:
                 await ctx.send("Admin only.")
                 return
             try:
@@ -476,6 +477,9 @@ class LLM(commands.Cog):
 
         # Single member mode
         if target:
+            if ctx.guild is None:
+                await ctx.send("Member lookup doesn't work in DMs — use `!dossier` with no arguments to see your own sheet.")
+                return
             # Try to resolve as a Member mention/name
             try:
                 converter = commands.MemberConverter()
