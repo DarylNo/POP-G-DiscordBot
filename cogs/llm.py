@@ -442,12 +442,8 @@ class LLM(commands.Cog):
     @commands.command(name="dossier", aliases=["sheet"], hidden=True)
     async def dossier(self, ctx: commands.Context, *, target: str = None) -> None:
         """Show the AI-generated character sheet for you, another member, or all members (admin: all)."""
-        # Admin bulk mode: !dossier all
+        # Bulk mode: !dossier all
         if target and target.lower() == "all":
-            is_admin = await self.bot.is_owner(ctx.author) if ctx.guild is None else _is_admin(ctx)
-            if not is_admin:
-                await ctx.send("Admin only.")
-                return
             try:
                 users = database.get_all_users()
             except Exception as e:
