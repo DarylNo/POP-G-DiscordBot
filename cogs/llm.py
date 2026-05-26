@@ -442,12 +442,14 @@ class LLM(commands.Cog):
     @commands.command(name="dossier", aliases=["sheet"], hidden=True)
     async def dossier(self, ctx: commands.Context, *, target: str = None) -> None:
         """Show the AI-generated character sheet for you, another member, or all members (admin: all)."""
-        # Admin bulk mode: !dossier all
+        # Bulk mode: !dossier all
         if target and target.lower() == "all":
-            if not _is_admin(ctx):
-                await ctx.send("Admin only.")
+            try:
+                users = database.get_all_users()
+            except Exception as e:
+                log.exception("!dossier all: failed to fetch users")
+                await ctx.send(f"Failed to fetch members from database: {e}")
                 return
-            users = database.get_all_users()
             if not users:
                 await ctx.send("No members in the database yet.")
                 return
@@ -463,11 +465,17 @@ class LLM(commands.Cog):
             summary = f"Dossier update complete — {done} updated"
             if failed:
                 summary += f", {failed} failed (check logs)"
-            await status_msg.edit(content=summary)
+            try:
+                await status_msg.edit(content=summary)
+            except Exception:
+                await ctx.send(summary)
             return
 
         # Single member mode
         if target:
+            if ctx.guild is None:
+                await ctx.send("Member lookup doesn't work in DMs — use `!dossier` with no arguments to see your own sheet.")
+                return
             # Try to resolve as a Member mention/name
             try:
                 converter = commands.MemberConverter()
@@ -503,6 +511,9 @@ class LLM(commands.Cog):
     async def dossier_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.BadArgument):
             await ctx.send("Usage: `!dossier [@member]`")
+        elif isinstance(error, commands.CommandInvokeError):
+            log.exception("!dossier unhandled error", exc_info=error.original)
+            await ctx.send(f"Error: `{error.original}`")
 
     @recap.error
     async def recap_error(self, ctx: commands.Context, error: Exception) -> None:
