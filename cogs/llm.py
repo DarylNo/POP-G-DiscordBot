@@ -442,33 +442,28 @@ class LLM(commands.Cog):
     @commands.command(name="dossier", aliases=["sheet"], hidden=True)
     async def dossier(self, ctx: commands.Context, *, target: str = None) -> None:
         """Show the AI-generated character sheet for you, another member, or all members (admin: all)."""
-        # Bulk mode: !dossier all
+        # Show all dossiers: !dossier all
         if target and target.lower() == "all":
-            try:
-                users = database.get_all_users()
-            except Exception as e:
-                log.exception("!dossier all: failed to fetch users")
-                await ctx.send(f"Failed to fetch members from database: {e}")
-                return
+            users = database.get_all_users()
             if not users:
                 await ctx.send("No members in the database yet.")
                 return
-            status_msg = await ctx.send(f"Updating dossiers for {len(users)} member(s)... 📋")
-            done, failed = 0, 0
+            sent = 0
             for user in users:
-                try:
-                    await _update_member_dossier(user["user_id"], user["display_name"], session_quotes=[])
-                    done += 1
-                except Exception:
-                    log.exception("Bulk dossier update failed for user %d", user["user_id"])
-                    failed += 1
-            summary = f"Dossier update complete — {done} updated"
-            if failed:
-                summary += f", {failed} failed (check logs)"
-            try:
-                await status_msg.edit(content=summary)
-            except Exception:
-                await ctx.send(summary)
+                row = database.get_dossier(user["user_id"])
+                if not row:
+                    continue
+                updated = row["last_updated"][:16].replace("T", " ") + " UTC"
+                embed = discord.Embed(
+                    title=f"📋 {user['display_name']} — POPG Dossier",
+                    description=row["content"],
+                    color=discord.Color.green(),
+                )
+                embed.set_footer(text=f"Last updated {updated} · Past our Prime Gamers")
+                await ctx.send(embed=embed)
+                sent += 1
+            if sent == 0:
+                await ctx.send("No dossiers built yet — run `!dossier rebuild` to generate them.")
             return
 
         # Single member mode
@@ -506,6 +501,31 @@ class LLM(commands.Cog):
     async def roast_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.BadArgument):
             await ctx.send("Usage: `!roast [session_id]`")
+
+    @commands.cooldown(1, 60, commands.BucketType.guild)
+    @commands.command(name="rebuild", aliases=["dossier-rebuild"], hidden=True)
+    async def rebuild(self, ctx: commands.Context) -> None:
+        """Rebuild dossiers for all members via Ollama."""
+        users = database.get_all_users()
+        if not users:
+            await ctx.send("No members in the database yet.")
+            return
+        status_msg = await ctx.send(f"Rebuilding dossiers for {len(users)} member(s)... 📋 (this will take a while)")
+        done, failed = 0, 0
+        for user in users:
+            try:
+                await _update_member_dossier(user["user_id"], user["display_name"], session_quotes=[])
+                done += 1
+            except Exception:
+                log.exception("Rebuild: dossier update failed for user %d", user["user_id"])
+                failed += 1
+        summary = f"Dossier rebuild complete — {done} updated"
+        if failed:
+            summary += f", {failed} failed (check logs)"
+        try:
+            await status_msg.edit(content=summary)
+        except Exception:
+            await ctx.send(summary)
 
     @dossier.error
     async def dossier_error(self, ctx: commands.Context, error: Exception) -> None:
