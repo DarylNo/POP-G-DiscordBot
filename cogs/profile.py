@@ -99,11 +99,6 @@ def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
             inline=True,
         )
 
-    earned_badges = [a for a in database.get_achievements(stats["user_id"]) if a["earned"]]
-    if earned_badges:
-        badge_line = "  ·  ".join(f"{a['emoji']} {a['name']}" for a in earned_badges)
-        embed.add_field(name=f"Badges ({len(earned_badges)})", value=badge_line, inline=False)
-
     if stats["top_games"]:
         lines = []
         for i, g in enumerate(stats["top_games"], 1):
