@@ -475,7 +475,7 @@ class LLM(commands.Cog):
             return
 
         # Reset mode: !dossier reset [@member]
-        if target.lower().startswith("reset"):
+        if target and target.lower().startswith("reset"):
             rest = target[5:].strip()
             if rest and ctx.guild is not None:
                 try:
