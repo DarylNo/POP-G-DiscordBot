@@ -914,6 +914,15 @@ def get_dossier(user_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def delete_dossier(user_id: int) -> bool:
+    conn = get_conn()
+    affected = conn.execute(
+        "DELETE FROM member_dossiers WHERE user_id=?", (user_id,)
+    ).rowcount
+    conn.commit()
+    return affected > 0
+
+
 def upsert_dossier(user_id: int, content: str) -> None:
     conn = get_conn()
     conn.execute(

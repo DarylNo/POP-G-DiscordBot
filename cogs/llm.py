@@ -471,7 +471,25 @@ class LLM(commands.Cog):
                 await ctx.send(embed=embed)
                 sent += 1
             if sent == 0:
-                await ctx.send("No dossiers built yet — run `!dossier rebuild` to generate them.")
+                await ctx.send("No dossiers built yet — run `!rebuild` to generate them.")
+            return
+
+        # Reset mode: !dossier reset [@member]
+        if target.lower().startswith("reset"):
+            rest = target[5:].strip()
+            if rest and ctx.guild is not None:
+                try:
+                    member = await commands.MemberConverter().convert(ctx, rest)
+                except commands.BadArgument:
+                    await ctx.send(f"Member `{rest}` not found.")
+                    return
+            else:
+                member = ctx.author
+            deleted = database.delete_dossier(member.id)
+            if deleted:
+                await ctx.send(f"Dossier for **{member.display_name}** deleted. Run `!rebuild` to rebuild it fresh.")
+            else:
+                await ctx.send(f"No dossier found for **{member.display_name}**.")
             return
 
         # Single member mode
@@ -511,9 +529,27 @@ class LLM(commands.Cog):
             await ctx.send("Usage: `!roast [session_id]`")
 
     @commands.cooldown(1, 60, commands.BucketType.guild)
-    @commands.command(name="rebuild", aliases=["dossier-rebuild"], hidden=True)
-    async def rebuild(self, ctx: commands.Context) -> None:
-        """Rebuild dossiers for all members via Ollama."""
+    @commands.command(name="rebuild", hidden=True)
+    async def rebuild(self, ctx: commands.Context, *, member_name: str = None) -> None:
+        """Rebuild dossier(s) via Ollama. Pass a name to rebuild one person."""
+        if member_name:
+            if ctx.guild is None:
+                await ctx.send("Member lookup doesn't work in DMs.")
+                return
+            try:
+                member = await commands.MemberConverter().convert(ctx, member_name)
+            except commands.BadArgument:
+                await ctx.send(f"Member `{member_name}` not found.")
+                return
+            status_msg = await ctx.send(f"Rebuilding dossier for **{member.display_name}**... 📋")
+            try:
+                await _update_member_dossier(member.id, member.display_name, session_quotes=[])
+                await status_msg.edit(content=f"Dossier rebuilt for **{member.display_name}**.")
+            except Exception:
+                log.exception("Rebuild: failed for user %d", member.id)
+                await status_msg.edit(content=f"Rebuild failed for **{member.display_name}** — check logs.")
+            return
+
         users = database.get_all_users()
         if not users:
             await ctx.send("No members in the database yet.")
