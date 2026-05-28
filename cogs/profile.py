@@ -133,16 +133,21 @@ class Profile(commands.Cog):
 
     @commands.cooldown(1, 5, commands.BucketType.user)
     @commands.command(name="profile", aliases=["stats"])
-    async def profile(self, ctx: commands.Context, member: discord.Member = None) -> None:
+    async def profile(self, ctx: commands.Context, *, member_name: str = None) -> None:
         """Show activity stats for yourself or another member."""
         if ctx.guild is None:
-            # DM — ignore any member arg, always show the sender's own stats
             target = _guild_member(ctx)
             if target is None:
                 await ctx.send("You need to be a member of the POPG server to use this command.")
                 return
+        elif member_name:
+            try:
+                target = await commands.MemberConverter().convert(ctx, member_name)
+            except commands.BadArgument:
+                await ctx.send("Could not find that member. Try mentioning them with @.")
+                return
         else:
-            target = member or ctx.author
+            target = ctx.author
         stats = database.get_user_stats(target.id)
         if stats is None:
             await ctx.send(f"No data found for **{target.display_name}**. They may need to be online while the bot is running.")

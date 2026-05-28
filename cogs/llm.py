@@ -182,12 +182,20 @@ async def _update_member_dossier(user_id: int, display_name: str, session_quotes
     stats_summary = "; ".join(stats_parts) or "(no stats yet)"
 
     # Voice quotes for this session
-    voice_quotes = "\n".join(f"- {q}" for q in session_quotes[:15]) or "(no voice data)"
+    voice_quotes = "\n".join(f"- {q}" for q in session_quotes[:15]) or ""
 
     # Chat messages: all since last update (or last 30 days for first time)
     since = existing["last_updated"] if existing else None
     chat_msgs = database.get_user_chat_messages(user_id, since=since, limit=200)
-    chat_sample = "\n".join(f"- {m['content']}" for m in chat_msgs) or "(no chat messages logged)"
+    chat_sample = "\n".join(f"- {m['content']}" for m in chat_msgs)
+
+    # Skip Ollama entirely if there's nothing new to work with on an update
+    if existing and not voice_quotes and not chat_sample:
+        log.debug("Dossier for user %d (%s): no new data, skipping.", user_id, display_name)
+        return
+
+    voice_quotes = voice_quotes or "(no voice data)"
+    chat_sample = chat_sample or "(no chat messages logged)"
 
     if existing:
         prompt = _DOSSIER_UPDATE_PROMPT.format(
