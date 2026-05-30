@@ -9,17 +9,6 @@ DB_PATH = os.path.join(os.getenv("DATA_DIR", "."), "popg.db")
 
 log = logging.getLogger("popg.database")
 
-# (emoji, display_name, description)
-ACHIEVEMENTS: dict[str, tuple[str, str, str]] = {
-    "online_1h":    ("⏰",  "Warming Up",        "Spend 1 hour online"),
-    "online_24h":   ("🟢",  "Regular",           "Spend 24 hours online"),
-    "online_100h":  ("⭐",  "Dedicated",         "Spend 100 hours online"),
-    "online_500h":  ("🌟",  "Veteran",           "Spend 500 hours online"),
-    "streak_3":     ("🔥",  "On a Roll",         "Achieve a 3-day activity streak"),
-    "streak_7":     ("📅",  "Week Warrior",      "Achieve a 7-day activity streak"),
-    "streak_30":    ("💫",  "Consistent",        "Achieve a 30-day activity streak"),
-}
-
 _local = threading.local()
 
 
@@ -109,13 +98,6 @@ def init_db() -> None:
             user_id INTEGER NOT NULL REFERENCES users(user_id),
             date    TEXT    NOT NULL,
             UNIQUE(user_id, date)
-        );
-
-        CREATE TABLE IF NOT EXISTS user_achievements (
-            user_id        INTEGER NOT NULL REFERENCES users(user_id),
-            achievement_id TEXT    NOT NULL,
-            earned_at      TEXT    NOT NULL,
-            PRIMARY KEY (user_id, achievement_id)
         );
 
         CREATE TABLE IF NOT EXISTS voice_transcripts (
@@ -262,7 +244,6 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
             _update_game_partners(conn, user_id, row["game_name"], row["started_at"], now)
         if session_type == "voice" and row["voice_channel_id"]:
             _update_voice_partners(conn, user_id, row["voice_channel_id"], row["started_at"], now)
-        _check_and_award_achievements(conn, user_id)
 
     conn.commit()
     return elapsed
@@ -278,10 +259,13 @@ def _record_activity_day(conn: sqlite3.Connection, user_id: int, date_str: str) 
 def _update_game_partners(
     conn: sqlite3.Connection, user_id: int, game_name: str, started_at_str: str, ended_at_str: str
 ) -> None:
+    # Only match partner sessions that have already ended. Each pair's overlap is then
+    # credited exactly once — when the later-ending session closes — instead of once per
+    # participant (which double-counted, using _now() as a phantom end for open sessions).
     overlapping = conn.execute(
         """SELECT user_id, started_at, ended_at FROM sessions
            WHERE session_type='gaming' AND game_name=? AND user_id!=?
-             AND started_at < ? AND (ended_at IS NULL OR ended_at > ?)""",
+             AND ended_at IS NOT NULL AND started_at < ? AND ended_at > ?""",
         (game_name, user_id, ended_at_str, started_at_str),
     ).fetchall()
     if not overlapping:
@@ -292,7 +276,7 @@ def _update_game_partners(
 
     for partner in overlapping:
         b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"] if partner["ended_at"] else _now())
+        b_end = datetime.fromisoformat(partner["ended_at"])
         overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
         if overlap <= 0:
             continue
@@ -311,10 +295,11 @@ def _update_game_partners(
 def _update_voice_partners(
     conn: sqlite3.Connection, user_id: int, channel_id: int, started_at_str: str, ended_at_str: str
 ) -> None:
+    # Only match partner sessions that have already ended (see _update_game_partners for why).
     overlapping = conn.execute(
         """SELECT user_id, started_at, ended_at FROM sessions
            WHERE session_type='voice' AND voice_channel_id=? AND user_id!=?
-             AND started_at < ? AND (ended_at IS NULL OR ended_at > ?)""",
+             AND ended_at IS NOT NULL AND started_at < ? AND ended_at > ?""",
         (channel_id, user_id, ended_at_str, started_at_str),
     ).fetchall()
     if not overlapping:
@@ -325,7 +310,7 @@ def _update_voice_partners(
 
     for partner in overlapping:
         b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"] if partner["ended_at"] else _now())
+        b_end = datetime.fromisoformat(partner["ended_at"])
         overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
         if overlap <= 0:
             continue
@@ -339,65 +324,6 @@ def _update_voice_partners(
                     session_count  = session_count + 1,
                     last_together  = excluded.last_together
             """, (uid, pid, overlap, ended_at_str))
-
-
-def _check_and_award_achievements(conn: sqlite3.Connection, user_id: int) -> list[str]:
-    """Check all achievement conditions and insert newly earned rows. Returns new achievement IDs."""
-    earned = {r["achievement_id"] for r in conn.execute(
-        "SELECT achievement_id FROM user_achievements WHERE user_id=?", (user_id,)
-    ).fetchall()}
-
-    user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-    if not user:
-        return []
-
-    # Streak uses the same connection so uncommitted activity_days rows are visible
-    current_streak, longest_streak = get_streaks(user_id)
-    best_streak = max(current_streak, longest_streak)
-
-    o = user["total_online_seconds"]
-
-    checks = {
-        "online_1h":   o >= 3_600,
-        "online_24h":  o >= 86_400,
-        "online_100h": o >= 360_000,
-        "online_500h": o >= 1_800_000,
-        "streak_3":    best_streak >= 3,
-        "streak_7":    best_streak >= 7,
-        "streak_30":   best_streak >= 30,
-    }
-
-    now = _now()
-    new_ids = []
-    for ach_id, condition in checks.items():
-        if condition and ach_id not in earned:
-            conn.execute(
-                "INSERT OR IGNORE INTO user_achievements (user_id, achievement_id, earned_at) VALUES (?, ?, ?)",
-                (user_id, ach_id, now),
-            )
-            new_ids.append(ach_id)
-    return new_ids
-
-
-def get_achievements(user_id: int) -> list[dict]:
-    """Return all achievements with earned status for the given user."""
-    conn = get_conn()
-    earned_map = {r["achievement_id"]: r["earned_at"] for r in conn.execute(
-        "SELECT achievement_id, earned_at FROM user_achievements WHERE user_id=? ORDER BY earned_at",
-        (user_id,),
-    ).fetchall()}
-
-    result = []
-    for ach_id, (emoji, name, description) in ACHIEVEMENTS.items():
-        result.append({
-            "id": ach_id,
-            "emoji": emoji,
-            "name": name,
-            "description": description,
-            "earned": ach_id in earned_map,
-            "earned_at": earned_map.get(ach_id),
-        })
-    return result
 
 
 def get_user_stats(user_id: int) -> Optional[dict]:
