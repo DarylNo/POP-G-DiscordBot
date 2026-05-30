@@ -3,11 +3,12 @@ import logging
 import discord
 from discord.ext import commands
 
+import database
 from cogs.admin import _is_admin
 
 log = logging.getLogger("popg.utility")
 
-USER_COMMANDS = """
+_USER_COMMANDS_TOP = """
 **Stats**
 `!profile [@member]` — Full stat dump: time, streak, top games, accomplices, crew
 
@@ -21,9 +22,11 @@ USER_COMMANDS = """
 
 **Social**
 `!accomplices [@member]` — Top gaming partners (who you play games with most)
-`!crew [@member]` — Top voice crew (who you hang out in voice with most)
-`!when [@member]` — AI prediction of when they'll next be online
+`!crew [@member]` — Top voice crew (who you hang out in voice with most)""".strip()
 
+_WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online"
+
+_USER_COMMANDS_BOTTOM = """
 **Voice Recap**
 `!recap [id]` — LLM summary of last (or specific) voice session
 `!roast [id]` — LLM roasts each speaker from a voice session
@@ -32,8 +35,7 @@ USER_COMMANDS = """
 
 **Other**
 `!ping` — Check bot latency
-`!help` — Show this message
-""".strip()
+`!help` — Show this message""".strip()
 
 ADMIN_VOICE_COMMANDS = """
 **Voice Recording (Admin)**
@@ -69,9 +71,16 @@ class Utility(commands.Cog):
     async def help(self, ctx: commands.Context) -> None:
         """Show all available commands."""
         log.info("help invoked by %s (DM=%s)", ctx.author, ctx.guild is None)
+
+        social_section = _USER_COMMANDS_TOP
+        if len(database.get_session_history(ctx.author.id, days=60)) >= 5:
+            social_section += "\n" + _WHEN_LINE
+
+        description = social_section + "\n\n" + _USER_COMMANDS_BOTTOM
+
         embed = discord.Embed(
             title="POPG Bot Commands",
-            description=USER_COMMANDS,
+            description=description,
             color=discord.Color.blurple(),
         )
         if ctx.guild and _is_admin(ctx):
@@ -87,3 +96,4 @@ class Utility(commands.Cog):
 
 def setup(bot: commands.Bot) -> None:
     bot.add_cog(Utility(bot))
+
