@@ -221,6 +221,24 @@ async def _update_member_dossier(user_id: int, display_name: str, session_quotes
     log.info("Dossier updated for user %d (%s).", user_id, display_name)
 
 
+_EMBED_DESC_LIMIT = 4096
+
+
+def _build_dossier_embed(display_name: str, row: dict) -> discord.Embed:
+    """Build a dossier embed, truncating content to Discord's description limit."""
+    content = row["content"] or ""
+    if len(content) > _EMBED_DESC_LIMIT:
+        content = content[: _EMBED_DESC_LIMIT - 1].rstrip() + "…"
+    updated = row["last_updated"][:16].replace("T", " ") + " UTC"
+    embed = discord.Embed(
+        title=f"📋 {display_name} — POPG Dossier",
+        description=content,
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text=f"Last updated {updated} · Past our Prime Gamers")
+    return embed
+
+
 class LLM(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -461,15 +479,13 @@ class LLM(commands.Cog):
                 row = database.get_dossier(user["user_id"])
                 if not row:
                     continue
-                updated = row["last_updated"][:16].replace("T", " ") + " UTC"
-                embed = discord.Embed(
-                    title=f"📋 {user['display_name']} — POPG Dossier",
-                    description=row["content"],
-                    color=discord.Color.green(),
-                )
-                embed.set_footer(text=f"Last updated {updated} · Past our Prime Gamers")
-                await ctx.send(embed=embed)
+                try:
+                    await ctx.send(embed=_build_dossier_embed(user["display_name"], row))
+                except discord.HTTPException:
+                    log.exception("Failed to send dossier embed for user %d", user["user_id"])
+                    continue
                 sent += 1
+                await asyncio.sleep(1)  # throttle to avoid Discord rate limits
             if sent == 0:
                 await ctx.send("No dossiers built yet — run `!rebuild` to generate them.")
             return
@@ -514,14 +530,7 @@ class LLM(commands.Cog):
                 "participate in a recorded voice session or chat in a watched channel to start building one."
             )
             return
-        updated = row["last_updated"][:16].replace("T", " ") + " UTC"
-        embed = discord.Embed(
-            title=f"📋 {member.display_name} — POPG Dossier",
-            description=row["content"],
-            color=discord.Color.green(),
-        )
-        embed.set_footer(text=f"Last updated {updated} · Past our Prime Gamers")
-        await ctx.send(embed=embed)
+        await ctx.send(embed=_build_dossier_embed(member.display_name, row))
 
     @roast.error
     async def roast_error(self, ctx: commands.Context, error: Exception) -> None:

@@ -9,7 +9,7 @@ log = logging.getLogger("popg.utility")
 
 USER_COMMANDS = """
 **Stats**
-`!profile [@member]` — Full stat dump: time, streak, badges, top games, accomplices, crew
+`!profile [@member]` — Full stat dump: time, streak, top games, accomplices, crew
 
 **Leaderboards**
 `!leaderboard [online|gaming|voice]` — This week's top 10 (default: online)
@@ -26,6 +26,7 @@ USER_COMMANDS = """
 
 **Voice Recap**
 `!recap [id]` — LLM summary of last (or specific) voice session
+`!roast [id]` — LLM roasts each speaker from a voice session
 `!transcript [id]` — Full attributed transcript with timestamps
 `!sessions` — List recent voice recording sessions
 
