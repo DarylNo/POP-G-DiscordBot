@@ -47,10 +47,11 @@ ADMIN_COMMANDS = """
 `!admin info @member` — Raw stat dump
 `!admin reset @member` — Zero out a member's stats
 `!admin reload <cog>` — Reload a cog without restarting
-`!log watch #channel` — Start logging a channel
-`!log unwatch #channel` — Stop logging a channel
+`!log watch <#channel|id>` — Start logging a channel
+`!log unwatch <#channel|id>` — Stop logging a channel
 `!log list` — Show watched channels
-`!log tail #channel` — Show last 20 logged messages
+`!log tail <#channel|id> [n]` — Show recent logged messages
+(DM the bot these commands with a channel ID to manage logging privately.)
 """.strip()
 
 

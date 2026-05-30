@@ -4,11 +4,18 @@ from datetime import timezone
 import discord
 from discord.ext import commands
 
+import config
 import database
-from cogs.admin import _is_admin
-from cogs.profile import _fmt_dt
+from cogs.profile import _fmt_dt, _guild_member
 
 log = logging.getLogger("popg.chat_logger")
+
+
+def _author_is_admin(ctx: commands.Context) -> bool:
+    """Admin check that also works in DMs by resolving the author in the POPG guild."""
+    member = _guild_member(ctx)
+    perms = getattr(member, "guild_permissions", None)
+    return bool(perms and perms.administrator)
 
 
 class ChatLogger(commands.Cog):
@@ -45,79 +52,146 @@ class ChatLogger(commands.Cog):
     # Admin commands
     # ------------------------------------------------------------------
 
-    @commands.guild_only()
+    async def _reply(self, ctx: commands.Context, content: str = None, *, embed: discord.Embed = None) -> None:
+        """Reply privately via DM so channel management never posts in a public channel.
+
+        In a DM this is identical to a normal reply. If the command was run in a server
+        and the user's DMs are closed, fall back to the channel so they still get feedback.
+        """
+        try:
+            await ctx.author.send(content=content, embed=embed)
+        except discord.Forbidden:
+            if ctx.guild is not None:
+                await ctx.send(content=content, embed=embed)
+
+    def _resolve_channel(self, ctx: commands.Context, ref: str) -> discord.TextChannel | None:
+        """Resolve a channel from a mention (<#id>), a raw ID, or (in-guild) a name.
+
+        Works in DMs as long as a mention or numeric ID is given. The channel must
+        belong to the configured POPG guild.
+        """
+        ref = ref.strip()
+        channel_id = None
+        if ref.startswith("<#") and ref.endswith(">") and ref[2:-1].isdigit():
+            channel_id = int(ref[2:-1])
+        elif ref.isdigit():
+            channel_id = int(ref)
+
+        if channel_id is not None:
+            ch = self.bot.get_channel(channel_id)
+        elif ctx.guild is not None:
+            ch = discord.utils.get(ctx.guild.text_channels, name=ref.lstrip("#"))
+        else:
+            ch = None
+
+        if not isinstance(ch, discord.TextChannel):
+            return None
+        if ch.guild.id != config.GUILD_ID:
+            return None
+        return ch
+
+    async def _bad_channel(self, ctx: commands.Context) -> None:
+        await self._reply(
+            ctx,
+            "Could not find that channel in the POPG server. In a DM, use the channel's "
+            "numeric ID — enable Developer Mode in Discord, right-click the channel → Copy Channel ID.",
+        )
+
     @commands.group(name="log", invoke_without_command=True)
     async def log_group(self, ctx: commands.Context) -> None:
         """Manage chat channel logging."""
-        if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
             return
         cmds = (
-            "`!log watch #channel` — start recording a channel\n"
-            "`!log unwatch #channel` — stop recording a channel\n"
+            "`!log watch <#channel|id>` — start recording a channel\n"
+            "`!log unwatch <#channel|id>` — stop recording a channel\n"
             "`!log list` — show all recorded channels\n"
-            "`!log tail #channel [n]` — show the last N messages (default 10)"
+            "`!log tail <#channel|id> [n]` — show the last N messages (default 10)\n\n"
+            "Works in DMs too — pass the channel's numeric ID (Developer Mode → Copy Channel ID)."
         )
         embed = discord.Embed(title="Chat Logging Commands", description=cmds, color=discord.Color.blue())
-        await ctx.send(embed=embed)
+        await self._reply(ctx, embed=embed)
 
     @log_group.command(name="watch")
-    async def log_watch(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+    async def log_watch(self, ctx: commands.Context, *, channel_ref: str = None) -> None:
         """Start recording messages in a channel."""
-        if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            return
+        if not channel_ref:
+            await self._reply(ctx, "Please specify a channel: `!log watch <#channel|id>`")
+            return
+        channel = self._resolve_channel(ctx, channel_ref)
+        if channel is None:
+            await self._bad_channel(ctx)
             return
         if channel.id in self._watched:
-            await ctx.send(f"{channel.mention} is already being recorded.")
+            await self._reply(ctx, f"{channel.mention} is already being recorded.")
             return
         database.add_watched_channel(channel.id, channel.name, ctx.author.id)
         self._watched.add(channel.id)
         log.info("Now watching channel #%s (%d)", channel.name, channel.id)
-        await ctx.send(f"Now recording messages in {channel.mention}.")
+        await self._reply(ctx, f"Now recording messages in {channel.mention}.")
 
     @log_group.command(name="unwatch")
-    async def log_unwatch(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+    async def log_unwatch(self, ctx: commands.Context, *, channel_ref: str = None) -> None:
         """Stop recording messages in a channel."""
-        if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            return
+        if not channel_ref:
+            await self._reply(ctx, "Please specify a channel: `!log unwatch <#channel|id>`")
+            return
+        channel = self._resolve_channel(ctx, channel_ref)
+        if channel is None:
+            await self._bad_channel(ctx)
             return
         if channel.id not in self._watched:
-            await ctx.send(f"{channel.mention} is not currently being recorded.")
+            await self._reply(ctx, f"{channel.mention} is not currently being recorded.")
             return
         database.remove_watched_channel(channel.id)
         self._watched.discard(channel.id)
         log.info("Stopped watching channel #%s (%d)", channel.name, channel.id)
-        await ctx.send(f"Stopped recording {channel.mention}. Existing messages are kept in the database.")
+        await self._reply(ctx, f"Stopped recording {channel.mention}. Existing messages are kept in the database.")
 
     @log_group.command(name="list")
     async def log_list(self, ctx: commands.Context) -> None:
         """List all channels currently being recorded."""
-        if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
             return
         channels = database.get_watched_channels_detail()
         if not channels:
-            await ctx.send("No channels are currently being recorded. Use `!log watch #channel` to start.")
+            await self._reply(ctx, "No channels are currently being recorded. Use `!log watch <#channel|id>` to start.")
             return
+        guild = self.bot.get_guild(config.GUILD_ID)
         embed = discord.Embed(title="Recorded Channels", color=discord.Color.blue())
         lines = []
         for ch in channels:
-            adder = ctx.guild.get_member(ch["added_by"])
+            adder = guild.get_member(ch["added_by"]) if guild else None
             adder_name = adder.display_name if adder else f"ID:{ch['added_by']}"
             lines.append(f"• <#{ch['channel_id']}> — added by {adder_name} on {_fmt_dt(ch['added_at'])}")
         embed.description = "\n".join(lines)
-        await ctx.send(embed=embed)
+        await self._reply(ctx, embed=embed)
 
     @log_group.command(name="tail")
-    async def log_tail(self, ctx: commands.Context, channel: discord.TextChannel, limit: int = 10) -> None:
+    async def log_tail(self, ctx: commands.Context, channel_ref: str = None, limit: int = 10) -> None:
         """Preview the last N recorded messages from a channel."""
-        if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            return
+        if not channel_ref:
+            await self._reply(ctx, "Please specify a channel: `!log tail <#channel|id> [n]`")
+            return
+        channel = self._resolve_channel(ctx, channel_ref)
+        if channel is None:
+            await self._bad_channel(ctx)
             return
         limit = max(1, min(limit, 25))
         messages = database.get_recent_messages(channel.id, limit=limit)
         if not messages:
-            await ctx.send(f"No recorded messages found for {channel.mention}.")
+            await self._reply(ctx, f"No recorded messages found for {channel.mention}.")
             return
         embed = discord.Embed(
             title=f"Last {len(messages)} messages — #{channel.name}",
@@ -129,16 +203,7 @@ class ChatLogger(commands.Cog):
             content = m["content"][:80] + ("…" if len(m["content"]) > 80 else "")
             lines.append(f"**{m['username']}** [{ts}]: {content}")
         embed.description = "\n".join(lines)
-        await ctx.send(embed=embed)
-
-    @log_watch.error
-    @log_unwatch.error
-    @log_tail.error
-    async def channel_arg_error(self, ctx: commands.Context, error: Exception) -> None:
-        if isinstance(error, commands.BadArgument):
-            await ctx.send("Could not find that channel. Try mentioning it with #.")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Please specify a channel: `!log watch #channel-name`")
+        await self._reply(ctx, embed=embed)
 
 
 def setup(bot: commands.Bot) -> None:
