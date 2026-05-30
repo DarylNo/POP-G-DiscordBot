@@ -8,7 +8,9 @@ from cogs.profile import _fmt_duration, _fmt_dt
 
 
 def _is_admin(ctx: commands.Context) -> bool:
-    return ctx.author.guild_permissions.administrator
+    # guild_permissions only exists on Member; ctx.author is a plain User in DMs
+    perms = getattr(ctx.author, "guild_permissions", None)
+    return bool(perms and perms.administrator)
 
 
 class Admin(commands.Cog):
