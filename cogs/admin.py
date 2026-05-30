@@ -13,6 +13,11 @@ def _is_admin(ctx: commands.Context) -> bool:
     return bool(perms and perms.administrator)
 
 
+# Discord usernames (handles, not display names) allowed to run !wipe.
+# Matched case-insensitively against ctx.author.name.
+WIPE_AUTHORIZED_USERNAMES = {"captcreep"}
+
+
 class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -119,6 +124,24 @@ class Admin(commands.Cog):
             await ctx.send(f"`{full_name}` is not loaded. Use `!admin load {cog_name}` instead.")
         except Exception as e:
             await ctx.send(f"Failed to reload `{full_name}`: {e}")
+
+    @commands.command(name="wipe", hidden=True)
+    async def wipe(self, ctx: commands.Context, confirm: str = None) -> None:
+        """Wipe ALL bot data. Restricted to authorized usernames. Requires confirmation."""
+        if ctx.author.name.lower() not in WIPE_AUTHORIZED_USERNAMES:
+            await ctx.send("You are not authorized to use this command.")
+            return
+        if confirm != "CONFIRM":
+            await ctx.send(
+                "⚠️ **This wipes ALL POPG bot data** — every member's stats, sessions, "
+                "game/voice partners, streaks, chat logs, voice transcripts, dossiers, and "
+                "watched-channel config. **This cannot be undone.**\n\n"
+                "Run `!wipe CONFIRM` to proceed."
+            )
+            return
+        counts = database.wipe_all_data()
+        total = sum(counts.values())
+        await ctx.send(f"💥 All POPG bot data has been wiped — {total} rows removed across {len(counts)} tables.")
 
     @admin_reset.error
     @admin_info.error

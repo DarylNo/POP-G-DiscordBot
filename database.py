@@ -500,6 +500,34 @@ def reset_user(user_id: int) -> bool:
     return affected > 0
 
 
+def wipe_all_data() -> dict[str, int]:
+    """Delete every row from all data tables. Returns rows deleted per table.
+
+    Irreversible. Child tables are cleared before their parents so foreign-key
+    constraints are satisfied. Schema (tables/columns) is left intact.
+    """
+    conn = get_conn()
+    # Order matters: delete referencing tables before the tables they reference.
+    tables = [
+        "transcript_segments",
+        "voice_transcripts",
+        "member_dossiers",
+        "activity_days",
+        "voice_partners",
+        "game_partners",
+        "chat_messages",
+        "watched_channels",
+        "game_stats",
+        "sessions",
+        "users",
+    ]
+    counts: dict[str, int] = {}
+    for t in tables:
+        counts[t] = conn.execute(f"DELETE FROM {t}").rowcount
+    conn.commit()
+    return counts
+
+
 def get_all_users() -> list[dict]:
     conn = get_conn()
     rows = conn.execute("SELECT * FROM users").fetchall()
