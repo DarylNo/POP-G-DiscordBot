@@ -22,7 +22,7 @@ USER_COMMANDS = """
 **Social**
 `!accomplices [@member]` — Top gaming partners (who you play games with most)
 `!crew [@member]` — Top voice crew (who you hang out in voice with most)
-`!heatmap [@member]` — When they're usually online (by hour and day of week)
+`!when [@member]` — AI prediction of when they'll next be online
 
 **Voice Recap**
 `!recap [id]` — LLM summary of last (or specific) voice session

@@ -11,7 +11,7 @@ from discord.ext import commands
 import config
 import database
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 
 # --- Logging: console + rotating file ---
 _data_dir = os.getenv("DATA_DIR", ".")

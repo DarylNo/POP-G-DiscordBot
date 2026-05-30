@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
@@ -80,6 +80,29 @@ Refine the sheet based on new evidence only. Rules:
 - Add to Nicknames only if you actually see one used in the new data
 - Move items from "Still Learning" to the right section if evidence is now clear
 - Keep the same section format, keep it under 400 words total"""
+
+_WHEN_PROMPT = """\
+You are analyzing Discord activity patterns for {display_name}, a member of "Past our Prime Gamers" (POPG), \
+a server of older casual gamers.
+
+Today is {today} ({day_of_week}, UTC).
+
+SESSION HISTORY — last {days} days (online/gaming sessions, UTC):
+{session_list}
+
+DAY-OF-WEEK BREAKDOWN (sessions per day, Mon–Sun):
+{day_summary}
+
+HOUR-OF-DAY BREAKDOWN (sessions per hour, 24h UTC):
+{hour_summary}
+
+{gaming_section}\
+Based on this data, answer:
+1. What days and times is this person most likely to be online?
+2. Do you see any rotating shift pattern (e.g. schedule that repeats every 2 weeks)?
+3. When is the NEXT time they're most likely to appear online — be specific (day + rough time)?
+
+Be honest if data is too sparse for a confident prediction. Keep it under 200 words and write casually."""
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
 
@@ -579,6 +602,118 @@ class LLM(commands.Cog):
             await status_msg.edit(content=summary)
         except Exception:
             await ctx.send(summary)
+
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    @commands.command(name="when")
+    async def when(self, ctx: commands.Context, *, member_name: str = None) -> None:
+        """Predict when a member will next be online based on their activity history."""
+        from cogs.social import _resolve_target  # avoid circular import at module level
+        target = await _resolve_target(ctx, member_name)
+        if target is None:
+            return
+
+        sessions = database.get_session_history(target.id, days=60)
+        if len(sessions) < 5:
+            await ctx.send(
+                f"Not enough activity data for **{target.display_name}** yet — "
+                "need at least 5 recorded sessions over the past 60 days."
+            )
+            return
+
+        status_msg = await ctx.send(f"Analysing **{target.display_name}**'s activity patterns... 🔍")
+
+        # Build per-session list (cap at 120 lines to stay within token budget)
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        day_counts = [0] * 7
+        hour_counts = [0] * 24
+        game_totals: dict[str, int] = defaultdict(int)
+        session_lines = []
+
+        for s in sessions:
+            try:
+                dt = datetime.fromisoformat(s["started_at"])
+            except (ValueError, TypeError):
+                continue
+            ended = s.get("ended_at")
+            try:
+                duration_secs = int(
+                    (datetime.fromisoformat(ended) - dt).total_seconds()
+                ) if ended else 0
+            except (ValueError, TypeError):
+                duration_secs = 0
+
+            day_counts[dt.weekday()] += 1
+            hour_counts[dt.hour] += 1
+
+            gname = s.get("game_name") or ""
+            if s["session_type"] == "gaming" and gname:
+                game_totals[gname] += duration_secs
+
+            dur_str = _fmt_duration(duration_secs) if duration_secs >= 60 else ""
+            label = f"gaming:{gname}" if s["session_type"] == "gaming" and gname else s["session_type"]
+            ts = dt.strftime("%a %Y-%m-%d %H:%M")
+            line = f"{ts} UTC  {label}"
+            if dur_str:
+                line += f"  ({dur_str})"
+            session_lines.append(line)
+
+        # Cap history fed to LLM
+        if len(session_lines) > 120:
+            session_lines = session_lines[-120:]
+
+        day_summary = "  ".join(
+            f"{day_names[i]}:{day_counts[i]}" for i in range(7)
+        )
+        hour_summary_parts = []
+        for h in range(24):
+            if hour_counts[h]:
+                hour_summary_parts.append(f"{h:02d}h:{hour_counts[h]}")
+        hour_summary = "  ".join(hour_summary_parts) or "(no data)"
+
+        if game_totals:
+            top_games = sorted(game_totals.items(), key=lambda x: x[1], reverse=True)[:5]
+            gaming_lines = [f"  {name}: {_fmt_duration(secs)}" for name, secs in top_games]
+            gaming_section = "TOP GAMES PLAYED:\n" + "\n".join(gaming_lines) + "\n\n"
+        else:
+            gaming_section = ""
+
+        today = datetime.now(timezone.utc)
+        prompt = _WHEN_PROMPT.format(
+            display_name=target.display_name,
+            today=today.strftime("%Y-%m-%d"),
+            day_of_week=today.strftime("%A"),
+            days=60,
+            session_list="\n".join(session_lines),
+            day_summary=day_summary,
+            hour_summary=hour_summary,
+            gaming_section=gaming_section,
+        )
+
+        try:
+            prediction = await _ollama_generate(prompt)
+        except Exception:
+            log.exception("!when: Ollama failed for user %d", target.id)
+            await status_msg.edit(content="Prediction failed — Ollama is not responding. Try again in a moment.")
+            return
+
+        embed = discord.Embed(
+            title=f"🔮 When will {target.display_name} be online?",
+            description=prediction,
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text=f"Based on {len(sessions)} sessions over 60 days · Past our Prime Gamers")
+        try:
+            await status_msg.delete()
+        except discord.HTTPException:
+            pass
+        await ctx.send(embed=embed)
+
+    @when.error
+    async def when_error(self, ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.BadArgument):
+            await ctx.send("Could not find that member. Try mentioning them with @.")
+        elif isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(f"This command is on cooldown. Try again in {error.retry_after:.0f}s.")
 
     @dossier.error
     async def dossier_error(self, ctx: commands.Context, error: Exception) -> None:
