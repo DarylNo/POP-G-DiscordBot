@@ -137,7 +137,7 @@ class Admin(commands.Cog):
         if confirm != "CONFIRM":
             await ctx.send(
                 "⚠️ **This wipes ALL POPG bot data** — every member's stats, sessions, "
-                "game/voice partners, streaks, chat logs, voice transcripts, dossiers, and "
+                "game/voice partners, streaks, chat logs, voice transcripts, and "
                 "watched-channel config. **This cannot be undone.**\n\n"
                 "Run `!wipe CONFIRM` to proceed."
             )
