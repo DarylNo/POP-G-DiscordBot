@@ -256,6 +256,17 @@ def _record_activity_day(conn: sqlite3.Connection, user_id: int, date_str: str) 
     )
 
 
+def _calc_overlap_seconds(
+    started_at_str: str, ended_at_str: str, partner_started: str, partner_ended: str
+) -> int:
+    """Return the overlap in whole seconds between two time intervals."""
+    a_start = datetime.fromisoformat(started_at_str)
+    a_end = datetime.fromisoformat(ended_at_str)
+    b_start = datetime.fromisoformat(partner_started)
+    b_end = datetime.fromisoformat(partner_ended)
+    return max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+
+
 def _update_game_partners(
     conn: sqlite3.Connection, user_id: int, game_name: str, started_at_str: str, ended_at_str: str
 ) -> None:
@@ -268,16 +279,8 @@ def _update_game_partners(
              AND ended_at IS NOT NULL AND started_at < ? AND ended_at > ?""",
         (game_name, user_id, ended_at_str, started_at_str),
     ).fetchall()
-    if not overlapping:
-        return
-
-    a_start = datetime.fromisoformat(started_at_str)
-    a_end = datetime.fromisoformat(ended_at_str)
-
     for partner in overlapping:
-        b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"])
-        overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+        overlap = _calc_overlap_seconds(started_at_str, ended_at_str, partner["started_at"], partner["ended_at"])
         if overlap <= 0:
             continue
         partner_id = partner["user_id"]
@@ -302,16 +305,8 @@ def _update_voice_partners(
              AND ended_at IS NOT NULL AND started_at < ? AND ended_at > ?""",
         (channel_id, user_id, ended_at_str, started_at_str),
     ).fetchall()
-    if not overlapping:
-        return
-
-    a_start = datetime.fromisoformat(started_at_str)
-    a_end = datetime.fromisoformat(ended_at_str)
-
     for partner in overlapping:
-        b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"])
-        overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+        overlap = _calc_overlap_seconds(started_at_str, ended_at_str, partner["started_at"], partner["ended_at"])
         if overlap <= 0:
             continue
         partner_id = partner["user_id"]

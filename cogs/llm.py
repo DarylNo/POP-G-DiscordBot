@@ -290,7 +290,7 @@ class LLM(commands.Cog):
         await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
-    async def on_transcript_ready(self, session_id: int, notify_channel: discord.TextChannel) -> None:
+    async def on_transcript_ready(self, session_id: int) -> None:
         """Fired by voice_listener after Whisper finishes. Generate and store the LLM summary."""
         segments = database.get_transcript_segments(session_id)
         if not segments:
@@ -455,16 +455,10 @@ class LLM(commands.Cog):
         if status == "recording":
             await ctx.send(f"Session #{sid} is still recording.")
             return
-        if status in ("processing", "failed") or not session.get("summary"):
-            segments = database.get_transcript_segments(sid)
-            if not segments:
-                await ctx.send(f"Session #{sid} has no transcript data to roast.")
-                return
-        else:
-            segments = database.get_transcript_segments(sid)
-            if not segments:
-                await ctx.send(f"Session #{sid} has no transcript data to roast.")
-                return
+        segments = database.get_transcript_segments(sid)
+        if not segments:
+            await ctx.send(f"Session #{sid} has no transcript data to roast.")
+            return
 
         await ctx.send(f"Roasting session #{sid}... 🔥 this may take a moment.")
 

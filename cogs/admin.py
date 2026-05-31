@@ -18,6 +18,9 @@ def _is_admin(ctx: commands.Context) -> bool:
 WIPE_AUTHORIZED_USERNAMES = {"captcreep"}
 
 
+_ADMIN_DENY = "You need Administrator permission or the Admin role to use this."
+
+
 class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -26,7 +29,7 @@ class Admin(commands.Cog):
     async def admin_group(self, ctx: commands.Context) -> None:
         """Admin commands for managing POPG bot data."""
         if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+            await ctx.send(_ADMIN_DENY)
             return
         cmds = (
             "`!admin reset @member` — zero a member's stats\n"
@@ -41,7 +44,7 @@ class Admin(commands.Cog):
     async def admin_reset(self, ctx: commands.Context, member: discord.Member) -> None:
         """Reset all tracked stats for a member."""
         if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+            await ctx.send(_ADMIN_DENY)
             return
         ok = database.reset_user(member.id)
         if ok:
@@ -53,7 +56,7 @@ class Admin(commands.Cog):
     async def admin_info(self, ctx: commands.Context, member: discord.Member) -> None:
         """Show a raw stat dump for a member."""
         if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+            await ctx.send(_ADMIN_DENY)
             return
         stats = database.get_user_stats(member.id)
         if stats is None:
@@ -84,7 +87,7 @@ class Admin(commands.Cog):
     async def admin_sessions(self, ctx: commands.Context) -> None:
         """List all currently active tracking sessions."""
         if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission or the Admin role to use this.")
+            await ctx.send(_ADMIN_DENY)
             return
 
         sessions = database.get_active_sessions()
@@ -114,7 +117,7 @@ class Admin(commands.Cog):
     async def admin_reload(self, ctx: commands.Context, cog_name: str) -> None:
         """Reload a cog without restarting the bot. Use the short name, e.g. tracking."""
         if not _is_admin(ctx):
-            await ctx.send("You need Administrator permission to use this.")
+            await ctx.send(_ADMIN_DENY)
             return
         full_name = cog_name if "." in cog_name else f"cogs.{cog_name}"
         try:

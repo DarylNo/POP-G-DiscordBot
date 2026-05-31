@@ -178,7 +178,7 @@ class VoiceListener(commands.Cog):
         log.info("Session %d: %d segments saved, dispatching transcript_ready.", session_id, len(all_segments))
 
         # Dispatch event so the LLM cog can pick it up
-        self.bot.dispatch("transcript_ready", session_id, notify_channel)
+        self.bot.dispatch("transcript_ready", session_id)
 
     @join.error
     async def join_error(self, ctx: commands.Context, error: Exception) -> None:

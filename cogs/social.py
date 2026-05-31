@@ -7,6 +7,18 @@ from cogs.profile import _fmt_duration, _guild_member
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
+def _partner_lines(rows: list[dict], time_key: str) -> str:
+    lines = []
+    for rank, row in enumerate(rows, 1):
+        medal = MEDALS.get(rank, f"`{rank}.`")
+        count = row["session_count"]
+        lines.append(
+            f"{medal} **{row['display_name']}** — {_fmt_duration(row[time_key])} together "
+            f"({count} session{'s' if count != 1 else ''})"
+        )
+    return "\n".join(lines)
+
+
 async def _resolve_target(ctx: commands.Context, member_name: str | None):
     """Resolve the target member, handling DMs and failed name lookups.
 
@@ -49,14 +61,7 @@ class Social(commands.Cog):
         if not rows:
             embed.description = "No gaming partners tracked yet. Play the same game as someone else to build history."
         else:
-            lines = []
-            for rank, row in enumerate(rows, 1):
-                medal = MEDALS.get(rank, f"`{rank}.`")
-                lines.append(
-                    f"{medal} **{row['display_name']}** — {_fmt_duration(row['total_seconds'])} together "
-                    f"({row['session_count']} session{'s' if row['session_count'] != 1 else ''})"
-                )
-            embed.description = "\n".join(lines)
+            embed.description = _partner_lines(rows, "total_seconds")
 
         embed.set_footer(text="Past our Prime Gamers")
         await ctx.send(embed=embed)
@@ -82,14 +87,7 @@ class Social(commands.Cog):
         if not rows:
             embed.description = "No voice crew data yet. Spend time in voice channels with others to build history."
         else:
-            lines = []
-            for rank, row in enumerate(rows, 1):
-                medal = MEDALS.get(rank, f"`{rank}.`")
-                lines.append(
-                    f"{medal} **{row['display_name']}** — {_fmt_duration(row['total_seconds'])} together "
-                    f"({row['session_count']} session{'s' if row['session_count'] != 1 else ''})"
-                )
-            embed.description = "\n".join(lines)
+            embed.description = _partner_lines(rows, "total_seconds")
 
         embed.set_footer(text="Past our Prime Gamers")
         await ctx.send(embed=embed)
