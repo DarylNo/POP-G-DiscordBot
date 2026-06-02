@@ -239,7 +239,7 @@ class LLM(commands.Cog):
     @commands.command(name="when")
     async def when(self, ctx: commands.Context, *, member_name: str = None) -> None:
         """Predict when a member will next be online based on their activity history."""
-        from cogs.social import _resolve_target  # avoid circular import at module level
+        from cogs.profile import _resolve_target
         target = await _resolve_target(ctx, member_name)
         if target is None:
             return

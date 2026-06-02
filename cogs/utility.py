@@ -10,7 +10,7 @@ log = logging.getLogger("popg.utility")
 
 _USER_COMMANDS_TOP = """
 **Stats**
-`!profile [@member]` — Full stat dump: time, streak, top games, accomplices, crew
+`!profile [@member]` — Full stat dump: time, streak, top games, gaming partners, voice crew
 
 **Leaderboards**
 `!leaderboard [online|gaming|voice]` — This week's top 10 (default: online)
@@ -20,9 +20,7 @@ _USER_COMMANDS_TOP = """
 `!weekly [online|gaming|voice]` — Shortcut for this week's leaderboard
 `!monthly [online|gaming|voice]` — Shortcut for this month's leaderboard
 
-**Social**
-`!accomplices [@member]` — Top gaming partners (who you play games with most)
-`!crew [@member]` — Top voice crew (who you hang out in voice with most)""".strip()
+**Predictions**""".strip()
 
 _WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online"
 
