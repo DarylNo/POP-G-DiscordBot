@@ -29,7 +29,6 @@ _WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online
 _USER_COMMANDS_BOTTOM = """
 **Voice Recap**
 `!recap [id]` — LLM summary of last (or specific) voice session
-`!roast [id]` — LLM roasts each speaker from a voice session
 `!transcript [id]` — Full attributed transcript with timestamps
 `!sessions` — List recent voice recording sessions
 
