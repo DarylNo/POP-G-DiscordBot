@@ -10,6 +10,8 @@ from cogs.profile import _fmt_dt, _guild_member
 
 log = logging.getLogger("popg.chat_logger")
 
+_ADMIN_DENY = "You need Administrator permission or the Admin role to use this."
+
 
 def _author_is_admin(ctx: commands.Context) -> bool:
     """Admin check that also works in DMs by resolving the author in the POPG guild."""
@@ -101,7 +103,7 @@ class ChatLogger(commands.Cog):
     async def log_group(self, ctx: commands.Context) -> None:
         """Manage chat channel logging."""
         if not _author_is_admin(ctx):
-            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            await self._reply(ctx, _ADMIN_DENY)
             return
         cmds = (
             "`!log watch <#channel|id>` — start recording a channel\n"
@@ -117,7 +119,7 @@ class ChatLogger(commands.Cog):
     async def log_watch(self, ctx: commands.Context, *, channel_ref: str = None) -> None:
         """Start recording messages in a channel."""
         if not _author_is_admin(ctx):
-            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            await self._reply(ctx, _ADMIN_DENY)
             return
         if not channel_ref:
             await self._reply(ctx, "Please specify a channel: `!log watch <#channel|id>`")
@@ -138,7 +140,7 @@ class ChatLogger(commands.Cog):
     async def log_unwatch(self, ctx: commands.Context, *, channel_ref: str = None) -> None:
         """Stop recording messages in a channel."""
         if not _author_is_admin(ctx):
-            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            await self._reply(ctx, _ADMIN_DENY)
             return
         if not channel_ref:
             await self._reply(ctx, "Please specify a channel: `!log unwatch <#channel|id>`")
@@ -159,7 +161,7 @@ class ChatLogger(commands.Cog):
     async def log_list(self, ctx: commands.Context) -> None:
         """List all channels currently being recorded."""
         if not _author_is_admin(ctx):
-            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            await self._reply(ctx, _ADMIN_DENY)
             return
         channels = database.get_watched_channels_detail()
         if not channels:
@@ -179,7 +181,7 @@ class ChatLogger(commands.Cog):
     async def log_tail(self, ctx: commands.Context, channel_ref: str = None, limit: int = 10) -> None:
         """Preview the last N recorded messages from a channel."""
         if not _author_is_admin(ctx):
-            await self._reply(ctx, "You need Administrator permission or the Admin role to use this.")
+            await self._reply(ctx, _ADMIN_DENY)
             return
         if not channel_ref:
             await self._reply(ctx, "Please specify a channel: `!log tail <#channel|id> [n]`")

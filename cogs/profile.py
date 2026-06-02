@@ -62,6 +62,28 @@ def _fmt_relative(iso: str) -> str:
     return _fmt_dt(iso)
 
 
+async def _resolve_target(ctx: commands.Context, member_name: str | None) -> discord.Member | None:
+    """Resolve a target member, handling DMs and failed name lookups.
+
+    Returns the Member, or None if an error was already sent to the user.
+    Uses a manual MemberConverter so a bad name reports an error instead of
+    silently falling back to ctx.author.
+    """
+    if ctx.guild is None:
+        target = _guild_member(ctx)
+        if target is None:
+            await ctx.send("You need to be a member of the POPG server to use this command.")
+            return None
+        return target
+    if member_name:
+        try:
+            return await commands.MemberConverter().convert(ctx, member_name)
+        except commands.BadArgument:
+            await ctx.send("Could not find that member. Try mentioning them with @.")
+            return None
+    return ctx.author
+
+
 def build_profile_embed(member: discord.Member, stats: dict) -> discord.Embed:
     embed = discord.Embed(
         title=f"POPG Profile — {stats['display_name']}",

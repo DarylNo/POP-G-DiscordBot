@@ -12,6 +12,36 @@ CATEGORIES = {
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
+_BAR_WIDTH = 12
+
+
+def _bar(score: int, top: int) -> str:
+    """Return a proportional block-bar for `score` relative to the top score."""
+    if top <= 0 or score <= 0:
+        return ""
+    filled = max(1, round(score / top * _BAR_WIDTH))
+    return "█" * filled
+
+
+def _ranked_lines(rows: list[dict], score_key: str, *, suffix_key: str = None) -> str:
+    """Render ranked rows with medal, name, a relative bar, and the formatted time.
+
+    `rows` must be sorted descending by `score_key`. If `suffix_key` is given,
+    that field is appended in parentheses as a session count.
+    """
+    top = max((r[score_key] for r in rows), default=0)
+    lines = []
+    for rank, row in enumerate(rows, 1):
+        medal = MEDALS.get(rank, f"`{rank}.`")
+        bar = _bar(row[score_key], top)
+        bar_part = f" `{bar}`" if bar else ""
+        line = f"{medal} **{row['display_name']}**{bar_part} {_fmt_duration(row[score_key])}"
+        if suffix_key is not None:
+            count = row[suffix_key]
+            line += f" ({count} session{'s' if count != 1 else ''})"
+        lines.append(line)
+    return "\n".join(lines)
+
 
 def _rank_footer(all_rows: list[dict], invoker_id: int, limit: int, suffix: str) -> str:
     """Return footer text, prepending 'You're #N' when invoker is outside the displayed top N."""
@@ -70,15 +100,7 @@ class Leaderboard(commands.Cog):
             if not rows:
                 embed.description = "No playtime recorded for this game yet."
             else:
-                lines = []
-                for rank, row in enumerate(rows, 1):
-                    medal = MEDALS.get(rank, f"`{rank}.`")
-                    sessions = row["session_count"]
-                    lines.append(
-                        f"{medal} **{row['display_name']}** — {_fmt_duration(row['total_seconds'])} "
-                        f"({sessions} session{'s' if sessions != 1 else ''})"
-                    )
-                embed.description = "\n".join(lines)
+                embed.description = _ranked_lines(rows, "total_seconds", suffix_key="session_count")
             embed.set_footer(text=_rank_footer(rows, invoker_id, 10, "Past our Prime Gamers"))
             await ctx.send(embed=embed)
             return
@@ -104,11 +126,7 @@ class Leaderboard(commands.Cog):
         if not rows:
             embed.description = "No activity recorded yet. Get gaming!"
         else:
-            lines = []
-            for rank, row in enumerate(rows, 1):
-                medal = MEDALS.get(rank, f"`{rank}.`")
-                lines.append(f"{medal} **{row['display_name']}** — {_fmt_duration(row['score'])}")
-            embed.description = "\n".join(lines)
+            embed.description = _ranked_lines(rows, "score")
 
         if scope == "all" and category == "gaming":
             top_games = database.get_top_games(limit=5)
@@ -147,11 +165,7 @@ class Leaderboard(commands.Cog):
         if not rows:
             embed.description = "No activity recorded this week yet."
         else:
-            lines = []
-            for rank, row in enumerate(rows, 1):
-                medal = MEDALS.get(rank, f"`{rank}.`")
-                lines.append(f"{medal} **{row['display_name']}** — {_fmt_duration(row['score'])}")
-            embed.description = "\n".join(lines)
+            embed.description = _ranked_lines(rows, "score")
 
         embed.set_footer(text=_rank_footer(
             all_rows, ctx.author.id, 10,
@@ -184,11 +198,7 @@ class Leaderboard(commands.Cog):
         if not rows:
             embed.description = "No activity recorded this month yet."
         else:
-            lines = []
-            for rank, row in enumerate(rows, 1):
-                medal = MEDALS.get(rank, f"`{rank}.`")
-                lines.append(f"{medal} **{row['display_name']}** — {_fmt_duration(row['score'])}")
-            embed.description = "\n".join(lines)
+            embed.description = _ranked_lines(rows, "score")
 
         embed.set_footer(text=_rank_footer(
             all_rows, ctx.author.id, 10,

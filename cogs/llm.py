@@ -1,15 +1,13 @@
-import asyncio
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 import database
-from cogs.admin import _is_admin
 from cogs.profile import _fmt_duration
 
 log = logging.getLogger("popg.llm")
@@ -28,58 +26,28 @@ notable moments or jokes. Keep it under 200 words and match the casual tone of t
 TRANSCRIPT:
 {transcript}"""
 
-_ROAST_PROMPT = """\
-You are the roast master for "Past our Prime Gamers" (POPG), a Discord server of older casual gamers.
-Based on what each person actually said in this voice chat, write a savage-but-friendly roast for each speaker.
-Think group chat energy — the kind of thing you'd say to a mate's face. Keep each roast to 2-3 sentences.
+_WHEN_PROMPT = """\
+You are analyzing Discord activity patterns for {display_name}, a member of "Past our Prime Gamers" (POPG), \
+a server of older casual gamers.
 
-WHAT EACH PERSON SAID:
-{per_speaker}
+Today is {today} ({day_of_week}, UTC).
 
-Write one roast per person. Format exactly like this (one per line, no extra text before or after):
-**[Name]**: [roast]"""
+SESSION HISTORY — last {days} days (online/gaming sessions, UTC):
+{session_list}
 
-_DOSSIER_INIT_PROMPT = """\
-You are building a character sheet for a member of "Past our Prime Gamers" (POPG), a Discord server of older casual gamers.
+DAY-OF-WEEK BREAKDOWN (sessions per day, Mon–Sun):
+{day_summary}
 
-Based on the data below, fill in what you can confidently infer. Leave sections sparse if there isn't enough evidence yet — do NOT speculate. This sheet will be updated after every session.
+HOUR-OF-DAY BREAKDOWN (sessions per hour, 24h UTC):
+{hour_summary}
 
-MEMBER: {display_name}
-STATS: {stats_summary}
-GAMING PARTNERS (plays games with): {accomplices}
-VOICE CREW (hangs out in voice with): {voice_crew}
-VOICE QUOTES (this session): {voice_quotes}
-RECENT CHAT MESSAGES: {chat_messages}
+{gaming_section}\
+Based on this data, answer:
+1. What days and times is this person most likely to be online?
+2. Do you see any rotating shift pattern (e.g. schedule that repeats every 2 weeks)?
+3. When is the NEXT time they're most likely to appear online — be specific (day + rough time)?
 
-Write the character sheet using exactly these sections. Use casual, fun language:
-
-**Nicknames:** [any nicknames used in chat or voice — only real examples found in the data]
-**Personality:** [communication style, humor, energy — only if evident]
-**Gaming Style:** [what they play, how they approach games — only if evident]
-**Social Role:** [group dynamic, leader vs follower, instigator vs peacemaker — only if evident]
-**Runs With:** [names of gaming partners and voice crew with a note on what they do together]
-**Catchphrases:** [recurring phrases or notable real quotes — only real examples]
-**Still Learning:** [things not yet clear, to fill in over time]"""
-
-_DOSSIER_UPDATE_PROMPT = """\
-You are updating a character sheet for {display_name}, a member of "Past our Prime Gamers" (POPG).
-
-CURRENT SHEET:
-{existing_content}
-
-NEW DATA FROM THIS SESSION:
-GAMING PARTNERS (plays games with): {accomplices}
-VOICE CREW (hangs out in voice with): {voice_crew}
-VOICE QUOTES: {voice_quotes}
-RECENT CHAT MESSAGES: {chat_messages}
-
-Refine the sheet based on new evidence only. Rules:
-- Only change a section if you have new evidence for it
-- Update "Runs With" if partner data has changed or new people appear
-- Add real quotes to Catchphrases if you spot recurring phrases
-- Add to Nicknames only if you actually see one used in the new data
-- Move items from "Still Learning" to the right section if evidence is now clear
-- Keep the same section format, keep it under 400 words total"""
+Be honest if data is too sparse for a confident prediction. Keep it under 200 words and write casually."""
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
 
@@ -90,21 +58,6 @@ def _fmt_timestamp(seconds: float) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
-
-
-def _build_per_speaker_text(segments: list[dict], max_quotes: int = 12) -> str:
-    quotes: dict[str, list[str]] = defaultdict(list)
-    for seg in segments:
-        quotes[seg["display_name"]].append(seg["text"])
-    lines = []
-    for name, texts in quotes.items():
-        if len(texts) > max_quotes:
-            step = max(1, len(texts) // max_quotes)
-            texts = texts[::step][:max_quotes]
-        lines.append(f"{name}:")
-        for t in texts:
-            lines.append(f"  - {t}")
-    return "\n".join(lines)
 
 
 def _build_transcript_text(segments: list[dict]) -> str:
@@ -141,133 +94,12 @@ async def _ollama_generate(prompt: str) -> str:
     return data.get("response", "").strip()
 
 
-async def _update_member_dossier(user_id: int, display_name: str, session_quotes: list[str]) -> None:
-    """Build or refine the LLM character sheet for one member."""
-    stats = database.get_user_stats(user_id)
-    accomplices = database.get_accomplices(user_id, limit=5)
-    crew = database.get_voice_crew(user_id, limit=5)
-    existing = database.get_dossier(user_id)
-
-    # Build social summary strings
-    def _fmt_accomplices(rows):
-        if not rows:
-            return "(none yet)"
-        parts = []
-        for r in rows:
-            t = _fmt_duration(r["total_seconds"])
-            parts.append(f"{r['display_name']} — {t} gaming together")
-        return "; ".join(parts)
-
-    def _fmt_crew(rows):
-        if not rows:
-            return "(none yet)"
-        parts = []
-        for r in rows:
-            t = _fmt_duration(r["total_seconds"])
-            parts.append(f"{r['display_name']} — {t} in voice together")
-        return "; ".join(parts)
-
-    accomplices_str = _fmt_accomplices(accomplices)
-    crew_str = _fmt_crew(crew)
-
-    # Build stats summary
-    stats_parts = []
-    if stats:
-        stats_parts.append(f"Online: {_fmt_duration(stats['total_online_seconds'])}")
-        stats_parts.append(f"Gaming: {_fmt_duration(stats['total_gaming_seconds'])}")
-        stats_parts.append(f"Voice: {_fmt_duration(stats['total_voice_seconds'])}")
-        if stats.get("top_games"):
-            games = ", ".join(g["game_name"] for g in stats["top_games"])
-            stats_parts.append(f"Top games: {games}")
-    stats_summary = "; ".join(stats_parts) or "(no stats yet)"
-
-    # Voice quotes for this session
-    voice_quotes = "\n".join(f"- {q}" for q in session_quotes[:15]) or ""
-
-    # Chat messages: all since last update (or last 30 days for first time)
-    since = existing["last_updated"] if existing else None
-    chat_msgs = database.get_user_chat_messages(user_id, since=since, limit=200)
-    chat_sample = "\n".join(f"- {m['content']}" for m in chat_msgs)
-
-    # Skip Ollama entirely if there's nothing new to work with on an update
-    if existing and not voice_quotes and not chat_sample:
-        log.debug("Dossier for user %d (%s): no new data, skipping.", user_id, display_name)
-        return
-
-    voice_quotes = voice_quotes or "(no voice data)"
-    chat_sample = chat_sample or "(no chat messages logged)"
-
-    if existing:
-        prompt = _DOSSIER_UPDATE_PROMPT.format(
-            display_name=display_name,
-            existing_content=existing["content"],
-            accomplices=accomplices_str,
-            voice_crew=crew_str,
-            voice_quotes=voice_quotes,
-            chat_messages=chat_sample,
-        )
-    else:
-        prompt = _DOSSIER_INIT_PROMPT.format(
-            display_name=display_name,
-            stats_summary=stats_summary,
-            accomplices=accomplices_str,
-            voice_crew=crew_str,
-            voice_quotes=voice_quotes,
-            chat_messages=chat_sample,
-        )
-
-    content = await _ollama_generate(prompt)
-    database.upsert_dossier(user_id, content)
-    log.info("Dossier updated for user %d (%s).", user_id, display_name)
-
-
-_EMBED_DESC_LIMIT = 4096
-
-
-def _build_dossier_embed(display_name: str, row: dict) -> discord.Embed:
-    """Build a dossier embed, truncating content to Discord's description limit."""
-    content = row["content"] or ""
-    if len(content) > _EMBED_DESC_LIMIT:
-        content = content[: _EMBED_DESC_LIMIT - 1].rstrip() + "…"
-    updated = row["last_updated"][:16].replace("T", " ") + " UTC"
-    embed = discord.Embed(
-        title=f"📋 {display_name} — POPG Dossier",
-        description=content,
-        color=discord.Color.green(),
-    )
-    embed.set_footer(text=f"Last updated {updated} · Past our Prime Gamers")
-    return embed
-
-
 class LLM(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._daily_dossier_task.start()
-
-    def cog_unload(self) -> None:
-        self._daily_dossier_task.cancel()
-
-    @tasks.loop(hours=24)
-    async def _daily_dossier_task(self) -> None:
-        """Update dossiers for text-chat-active members who haven't had a voice session recently."""
-        users = database.get_all_users()
-        for user in users:
-            uid = user["user_id"]
-            existing = database.get_dossier(uid)
-            since = existing["last_updated"] if existing else None
-            msgs = database.get_user_chat_messages(uid, since=since, limit=200)
-            if len(msgs) >= 10:
-                try:
-                    await _update_member_dossier(uid, user["display_name"], session_quotes=[])
-                except Exception:
-                    log.exception("Daily dossier update failed for user %d", uid)
-
-    @_daily_dossier_task.before_loop
-    async def _before_daily_dossier(self) -> None:
-        await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
-    async def on_transcript_ready(self, session_id: int, notify_channel: discord.TextChannel) -> None:
+    async def on_transcript_ready(self, session_id: int) -> None:
         """Fired by voice_listener after Whisper finishes. Generate and store the LLM summary."""
         segments = database.get_transcript_segments(session_id)
         if not segments:
@@ -284,21 +116,7 @@ class LLM(commands.Cog):
             return
 
         database.set_transcript_summary(session_id, summary)
-        log.info("Session %d: summary stored — use !recap or !roast to view.", session_id)
-
-        # Update dossiers for each speaker in this session
-        by_user: dict[int, tuple[str, list[str]]] = {}
-        for seg in segments:
-            uid = seg["user_id"]
-            if uid not in by_user:
-                by_user[uid] = (seg["display_name"], [])
-            by_user[uid][1].append(seg["text"])
-
-        for uid, (name, quotes) in by_user.items():
-            try:
-                await _update_member_dossier(uid, name, quotes)
-            except Exception:
-                log.exception("Dossier update failed for user %d", uid)
+        log.info("Session %d: summary stored — use !recap to view.", session_id)
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.command(name="recap")
@@ -417,176 +235,117 @@ class LLM(commands.Cog):
         embed.set_footer(text="!recap <id> · !transcript <id> · Past our Prime Gamers")
         await ctx.send(embed=embed)
 
-    @commands.cooldown(1, 30, commands.BucketType.guild)
-    @commands.command(name="roast")
-    async def roast(self, ctx: commands.Context, session_id: int = None) -> None:
-        """Have the LLM roast each member based on their voice chat transcript."""
-        session = database.get_transcript_session(session_id)
-        if session is None:
-            await ctx.send("No voice sessions recorded yet." if session_id is None else f"Session #{session_id} not found.")
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    @commands.command(name="when")
+    async def when(self, ctx: commands.Context, *, member_name: str = None) -> None:
+        """Predict when a member will next be online based on their activity history."""
+        from cogs.profile import _resolve_target
+        target = await _resolve_target(ctx, member_name)
+        if target is None:
             return
 
-        sid = session["id"]
-        status = session["status"]
-
-        if status == "recording":
-            await ctx.send(f"Session #{sid} is still recording.")
-            return
-        if status in ("processing", "failed") or not session.get("summary"):
-            segments = database.get_transcript_segments(sid)
-            if not segments:
-                await ctx.send(f"Session #{sid} has no transcript data to roast.")
-                return
-        else:
-            segments = database.get_transcript_segments(sid)
-            if not segments:
-                await ctx.send(f"Session #{sid} has no transcript data to roast.")
-                return
-
-        await ctx.send(f"Roasting session #{sid}... 🔥 this may take a moment.")
-
-        per_speaker = _build_per_speaker_text(segments)
-        prompt = _ROAST_PROMPT.format(per_speaker=per_speaker)
-
-        try:
-            roast_text = await _ollama_generate(prompt)
-        except Exception:
-            log.exception("Ollama roast failed for session %d", sid)
-            await ctx.send(f"Roast failed. Judge them yourself with `!transcript {sid}`.")
-            return
-
-        started = session["started_at"][:16].replace("T", " ") + " UTC"
-        embed = discord.Embed(
-            title=f"🔥 Session #{sid} Roast — {session['channel_name']}",
-            description=roast_text,
-            color=discord.Color.orange(),
-        )
-        embed.set_footer(text=f"Recorded {started} · Past our Prime Gamers")
-        await ctx.send(embed=embed)
-
-    @commands.cooldown(1, 5, commands.BucketType.user)
-    @commands.command(name="dossier", aliases=["sheet"], hidden=True)
-    async def dossier(self, ctx: commands.Context, *, target: str = None) -> None:
-        """Show the AI-generated character sheet for you, another member, or all members (admin: all)."""
-        # Show all dossiers: !dossier all
-        if target and target.lower() == "all":
-            users = database.get_all_users()
-            if not users:
-                await ctx.send("No members in the database yet.")
-                return
-            sent = 0
-            for user in users:
-                row = database.get_dossier(user["user_id"])
-                if not row:
-                    continue
-                try:
-                    await ctx.send(embed=_build_dossier_embed(user["display_name"], row))
-                except discord.HTTPException:
-                    log.exception("Failed to send dossier embed for user %d", user["user_id"])
-                    continue
-                sent += 1
-                await asyncio.sleep(1)  # throttle to avoid Discord rate limits
-            if sent == 0:
-                await ctx.send("No dossiers built yet — run `!rebuild` to generate them.")
-            return
-
-        # Reset mode: !dossier reset [@member]
-        if target and target.lower().startswith("reset"):
-            rest = target[5:].strip()
-            if rest and ctx.guild is not None:
-                try:
-                    member = await commands.MemberConverter().convert(ctx, rest)
-                except commands.BadArgument:
-                    await ctx.send(f"Member `{rest}` not found.")
-                    return
-            else:
-                member = ctx.author
-            deleted = database.delete_dossier(member.id)
-            if deleted:
-                await ctx.send(f"Dossier for **{member.display_name}** deleted. Run `!rebuild` to rebuild it fresh.")
-            else:
-                await ctx.send(f"No dossier found for **{member.display_name}**.")
-            return
-
-        # Single member mode
-        if target:
-            if ctx.guild is None:
-                await ctx.send("Member lookup doesn't work in DMs — use `!dossier` with no arguments to see your own sheet.")
-                return
-            # Try to resolve as a Member mention/name
-            try:
-                converter = commands.MemberConverter()
-                member = await converter.convert(ctx, target)
-            except commands.BadArgument:
-                await ctx.send(f"Member `{target}` not found.")
-                return
-        else:
-            member = ctx.author
-
-        row = database.get_dossier(member.id)
-        if not row:
+        sessions = database.get_session_history(target.id, days=60)
+        if len(sessions) < 5:
             await ctx.send(
-                f"No dossier yet for **{member.display_name}** — "
-                "participate in a recorded voice session or chat in a watched channel to start building one."
+                f"Not enough activity data for **{target.display_name}** yet — "
+                "need at least 5 recorded sessions over the past 60 days."
             )
             return
-        await ctx.send(embed=_build_dossier_embed(member.display_name, row))
 
-    @roast.error
-    async def roast_error(self, ctx: commands.Context, error: Exception) -> None:
-        if isinstance(error, commands.BadArgument):
-            await ctx.send("Usage: `!roast [session_id]`")
+        status_msg = await ctx.send(f"Analysing **{target.display_name}**'s activity patterns... 🔍")
 
-    @commands.cooldown(1, 60, commands.BucketType.guild)
-    @commands.command(name="rebuild", hidden=True)
-    async def rebuild(self, ctx: commands.Context, *, member_name: str = None) -> None:
-        """Rebuild dossier(s) via Ollama. Pass a name to rebuild one person."""
-        if member_name:
-            if ctx.guild is None:
-                await ctx.send("Member lookup doesn't work in DMs.")
-                return
-            try:
-                member = await commands.MemberConverter().convert(ctx, member_name)
-            except commands.BadArgument:
-                await ctx.send(f"Member `{member_name}` not found.")
-                return
-            status_msg = await ctx.send(f"Rebuilding dossier for **{member.display_name}**... 📋")
-            try:
-                await _update_member_dossier(member.id, member.display_name, session_quotes=[])
-                await status_msg.edit(content=f"Dossier rebuilt for **{member.display_name}**.")
-            except Exception:
-                log.exception("Rebuild: failed for user %d", member.id)
-                await status_msg.edit(content=f"Rebuild failed for **{member.display_name}** — check logs.")
-            return
+        # Build per-session list (cap at 120 lines to stay within token budget)
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        day_counts = [0] * 7
+        hour_counts = [0] * 24
+        game_totals: dict[str, int] = defaultdict(int)
+        session_lines = []
 
-        users = database.get_all_users()
-        if not users:
-            await ctx.send("No members in the database yet.")
-            return
-        status_msg = await ctx.send(f"Rebuilding dossiers for {len(users)} member(s)... 📋 (this will take a while)")
-        done, failed = 0, 0
-        for user in users:
+        for s in sessions:
             try:
-                await _update_member_dossier(user["user_id"], user["display_name"], session_quotes=[])
-                done += 1
-            except Exception:
-                log.exception("Rebuild: dossier update failed for user %d", user["user_id"])
-                failed += 1
-        summary = f"Dossier rebuild complete — {done} updated"
-        if failed:
-            summary += f", {failed} failed (check logs)"
+                dt = datetime.fromisoformat(s["started_at"])
+            except (ValueError, TypeError):
+                continue
+            ended = s.get("ended_at")
+            try:
+                duration_secs = int(
+                    (datetime.fromisoformat(ended) - dt).total_seconds()
+                ) if ended else 0
+            except (ValueError, TypeError):
+                duration_secs = 0
+
+            day_counts[dt.weekday()] += 1
+            hour_counts[dt.hour] += 1
+
+            gname = s.get("game_name") or ""
+            if s["session_type"] == "gaming" and gname:
+                game_totals[gname] += duration_secs
+
+            dur_str = _fmt_duration(duration_secs) if duration_secs >= 60 else ""
+            label = f"gaming:{gname}" if s["session_type"] == "gaming" and gname else s["session_type"]
+            ts = dt.strftime("%a %Y-%m-%d %H:%M")
+            line = f"{ts} UTC  {label}"
+            if dur_str:
+                line += f"  ({dur_str})"
+            session_lines.append(line)
+
+        # Cap history fed to LLM
+        if len(session_lines) > 120:
+            session_lines = session_lines[-120:]
+
+        day_summary = "  ".join(
+            f"{day_names[i]}:{day_counts[i]}" for i in range(7)
+        )
+        hour_summary_parts = []
+        for h in range(24):
+            if hour_counts[h]:
+                hour_summary_parts.append(f"{h:02d}h:{hour_counts[h]}")
+        hour_summary = "  ".join(hour_summary_parts) or "(no data)"
+
+        if game_totals:
+            top_games = sorted(game_totals.items(), key=lambda x: x[1], reverse=True)[:5]
+            gaming_lines = [f"  {name}: {_fmt_duration(secs)}" for name, secs in top_games]
+            gaming_section = "TOP GAMES PLAYED:\n" + "\n".join(gaming_lines) + "\n\n"
+        else:
+            gaming_section = ""
+
+        today = datetime.now(timezone.utc)
+        prompt = _WHEN_PROMPT.format(
+            display_name=target.display_name,
+            today=today.strftime("%Y-%m-%d"),
+            day_of_week=today.strftime("%A"),
+            days=60,
+            session_list="\n".join(session_lines),
+            day_summary=day_summary,
+            hour_summary=hour_summary,
+            gaming_section=gaming_section,
+        )
+
         try:
-            await status_msg.edit(content=summary)
+            prediction = await _ollama_generate(prompt)
         except Exception:
-            await ctx.send(summary)
+            log.exception("!when: Ollama failed for user %d", target.id)
+            await status_msg.edit(content="Prediction failed — Ollama is not responding. Try again in a moment.")
+            return
 
-    @dossier.error
-    async def dossier_error(self, ctx: commands.Context, error: Exception) -> None:
+        embed = discord.Embed(
+            title=f"🔮 When will {target.display_name} be online?",
+            description=prediction,
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text=f"Based on {len(sessions)} sessions over 60 days · Past our Prime Gamers")
+        try:
+            await status_msg.delete()
+        except discord.HTTPException:
+            pass
+        await ctx.send(embed=embed)
+
+    @when.error
+    async def when_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.BadArgument):
-            await ctx.send("Usage: `!dossier [@member]`")
-        elif isinstance(error, commands.CommandInvokeError):
-            log.exception("!dossier unhandled error", exc_info=error.original)
-            await ctx.send(f"Error: `{error.original}`")
+            await ctx.send("Could not find that member. Try mentioning them with @.")
+        elif isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(f"This command is on cooldown. Try again in {error.retry_after:.0f}s.")
 
     @recap.error
     async def recap_error(self, ctx: commands.Context, error: Exception) -> None:

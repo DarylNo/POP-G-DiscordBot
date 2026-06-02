@@ -119,11 +119,6 @@ def init_db() -> None:
             text         TEXT    NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS member_dossiers (
-            user_id      INTEGER PRIMARY KEY REFERENCES users(user_id),
-            content      TEXT    NOT NULL DEFAULT '',
-            last_updated TEXT    NOT NULL
-        );
     """)
     # Migrations for existing databases
     for migration in [
@@ -256,6 +251,17 @@ def _record_activity_day(conn: sqlite3.Connection, user_id: int, date_str: str) 
     )
 
 
+def _calc_overlap_seconds(
+    started_at_str: str, ended_at_str: str, partner_started: str, partner_ended: str
+) -> int:
+    """Return the overlap in whole seconds between two time intervals."""
+    a_start = datetime.fromisoformat(started_at_str)
+    a_end = datetime.fromisoformat(ended_at_str)
+    b_start = datetime.fromisoformat(partner_started)
+    b_end = datetime.fromisoformat(partner_ended)
+    return max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+
+
 def _update_game_partners(
     conn: sqlite3.Connection, user_id: int, game_name: str, started_at_str: str, ended_at_str: str
 ) -> None:
@@ -268,16 +274,8 @@ def _update_game_partners(
              AND ended_at IS NOT NULL AND started_at < ? AND ended_at > ?""",
         (game_name, user_id, ended_at_str, started_at_str),
     ).fetchall()
-    if not overlapping:
-        return
-
-    a_start = datetime.fromisoformat(started_at_str)
-    a_end = datetime.fromisoformat(ended_at_str)
-
     for partner in overlapping:
-        b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"])
-        overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+        overlap = _calc_overlap_seconds(started_at_str, ended_at_str, partner["started_at"], partner["ended_at"])
         if overlap <= 0:
             continue
         partner_id = partner["user_id"]
@@ -302,16 +300,8 @@ def _update_voice_partners(
              AND ended_at IS NOT NULL AND started_at < ? AND ended_at > ?""",
         (channel_id, user_id, ended_at_str, started_at_str),
     ).fetchall()
-    if not overlapping:
-        return
-
-    a_start = datetime.fromisoformat(started_at_str)
-    a_end = datetime.fromisoformat(ended_at_str)
-
     for partner in overlapping:
-        b_start = datetime.fromisoformat(partner["started_at"])
-        b_end = datetime.fromisoformat(partner["ended_at"])
-        overlap = max(0, int((min(a_end, b_end) - max(a_start, b_start)).total_seconds()))
+        overlap = _calc_overlap_seconds(started_at_str, ended_at_str, partner["started_at"], partner["ended_at"])
         if overlap <= 0:
             continue
         partner_id = partner["user_id"]
@@ -454,30 +444,25 @@ def get_top_games(limit: int = 5) -> list[dict]:
     return results[:limit]
 
 
-def get_activity_heatmap(user_id: int) -> dict:
-    """Return hour-of-day and day-of-week session counts for a user.
+def get_session_history(user_id: int, days: int = 60) -> list[dict]:
+    """Return raw session rows for the past N days (online + gaming), oldest first.
 
-    Uses online session start times as the activity signal.
-    Returns {"hours": [24 ints], "days": [7 ints], "total": int}
-    where days[0]=Monday and days[6]=Sunday.
+    Each row contains: started_at, ended_at, session_type, game_name.
+    Only fully-ended sessions are returned so durations are accurate.
     """
     conn = get_conn()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     rows = conn.execute(
-        "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' AND ended_at IS NOT NULL",
-        (user_id,),
+        """SELECT started_at, ended_at, session_type, game_name
+           FROM sessions
+           WHERE user_id=?
+             AND session_type IN ('online', 'gaming')
+             AND ended_at IS NOT NULL
+             AND started_at >= ?
+           ORDER BY started_at ASC""",
+        (user_id, cutoff),
     ).fetchall()
-
-    hours = [0] * 24
-    days = [0] * 7
-    for row in rows:
-        try:
-            dt = datetime.fromisoformat(row["started_at"])
-            hours[dt.hour] += 1
-            days[dt.weekday()] += 1  # Monday=0, Sunday=6
-        except (ValueError, TypeError):
-            pass
-
-    return {"hours": hours, "days": days, "total": len(rows)}
+    return [dict(r) for r in rows]
 
 
 def get_active_sessions() -> list[dict]:
@@ -511,7 +496,6 @@ def wipe_all_data() -> dict[str, int]:
     tables = [
         "transcript_segments",
         "voice_transcripts",
-        "member_dossiers",
         "activity_days",
         "voice_partners",
         "game_partners",
@@ -858,45 +842,3 @@ def list_transcript_sessions(limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# --- Member dossiers ---
-
-def get_dossier(user_id: int) -> Optional[dict]:
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT content, last_updated FROM member_dossiers WHERE user_id=?", (user_id,)
-    ).fetchone()
-    return dict(row) if row else None
-
-
-def delete_dossier(user_id: int) -> bool:
-    conn = get_conn()
-    affected = conn.execute(
-        "DELETE FROM member_dossiers WHERE user_id=?", (user_id,)
-    ).rowcount
-    conn.commit()
-    return affected > 0
-
-
-def upsert_dossier(user_id: int, content: str) -> None:
-    conn = get_conn()
-    conn.execute(
-        """INSERT INTO member_dossiers (user_id, content, last_updated)
-           VALUES (?, ?, ?)
-           ON CONFLICT(user_id) DO UPDATE SET content=excluded.content, last_updated=excluded.last_updated""",
-        (user_id, content, _now()),
-    )
-    conn.commit()
-
-
-def get_user_chat_messages(user_id: int, since: Optional[str] = None, limit: int = 200) -> list[dict]:
-    """Return chat messages for a user. If since is None, returns last 30 days."""
-    conn = get_conn()
-    if since is None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    else:
-        cutoff = since
-    rows = conn.execute(
-        "SELECT content, sent_at FROM chat_messages WHERE user_id=? AND sent_at > ? ORDER BY sent_at ASC LIMIT ?",
-        (user_id, cutoff, limit),
-    ).fetchall()
-    return [dict(r) for r in rows]
