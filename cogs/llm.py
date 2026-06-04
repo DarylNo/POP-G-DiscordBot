@@ -2,6 +2,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -15,6 +16,8 @@ log = logging.getLogger("popg.llm")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
+
+_TZ_TORONTO = ZoneInfo("America/Toronto")
 
 _SUMMARY_PROMPT = """\
 You are summarizing a voice chat session from a Discord gaming server called "Past our Prime Gamers" (POPG). \
@@ -30,9 +33,9 @@ _WHEN_PROMPT = """\
 You are analyzing Discord activity patterns for {display_name}, a member of "Past our Prime Gamers" (POPG), \
 a server of older casual gamers.
 
-Today is {today} ({day_of_week}, UTC).
+Today is {today} ({day_of_week}, Toronto time / ET).
 
-SESSION HISTORY — last {days} days (online/gaming sessions, UTC):
+SESSION HISTORY — last {days} days (online/gaming sessions, Toronto time / ET):
 {session_list}
 
 DAY-OF-WEEK BREAKDOWN (sessions per day, Mon–Sun):
@@ -263,13 +266,13 @@ class LLM(commands.Cog):
 
         for s in sessions:
             try:
-                dt = datetime.fromisoformat(s["started_at"])
+                dt = datetime.fromisoformat(s["started_at"]).replace(tzinfo=timezone.utc).astimezone(_TZ_TORONTO)
             except (ValueError, TypeError):
                 continue
             ended = s.get("ended_at")
             try:
                 duration_secs = int(
-                    (datetime.fromisoformat(ended) - dt).total_seconds()
+                    (datetime.fromisoformat(ended) - datetime.fromisoformat(s["started_at"])).total_seconds()
                 ) if ended else 0
             except (ValueError, TypeError):
                 duration_secs = 0
@@ -284,7 +287,7 @@ class LLM(commands.Cog):
             dur_str = _fmt_duration(duration_secs) if duration_secs >= 60 else ""
             label = f"gaming:{gname}" if s["session_type"] == "gaming" and gname else s["session_type"]
             ts = dt.strftime("%a %Y-%m-%d %H:%M")
-            line = f"{ts} UTC  {label}"
+            line = f"{ts} ET  {label}"
             if dur_str:
                 line += f"  ({dur_str})"
             session_lines.append(line)
@@ -309,7 +312,7 @@ class LLM(commands.Cog):
         else:
             gaming_section = ""
 
-        today = datetime.now(timezone.utc)
+        today = datetime.now(_TZ_TORONTO)
         prompt = _WHEN_PROMPT.format(
             display_name=target.display_name,
             today=today.strftime("%Y-%m-%d"),
