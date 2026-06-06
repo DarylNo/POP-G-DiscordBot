@@ -91,18 +91,19 @@ def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
 
 
 async def _ollama_generate(prompt: str, system: str = "") -> str:
-    payload: dict = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+    messages = []
     if system:
-        payload["system"] = system
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
-            f"{OLLAMA_URL}/api/generate",
-            json=payload,
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
         resp.raise_for_status()
         data = await resp.json()
-    return data.get("response", "").strip()
+    return data.get("message", {}).get("content", "").strip()
 
 
 class LLM(commands.Cog):
