@@ -123,8 +123,27 @@ class LLM(commands.Cog):
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.command(name="recap")
-    async def recap(self, ctx: commands.Context, session_id: int = None) -> None:
-        """Show the LLM summary for the last (or a specific) voice session."""
+    async def recap(self, ctx: commands.Context, *args: str) -> None:
+        """Show the LLM summary for the last (or a specific) voice session.
+
+        Usage:
+          !recap              — latest session
+          !recap 5            — session #5
+          !recap redo         — regenerate latest session's summary
+          !recap redo 5       — regenerate session #5's summary
+        """
+        # Parse args: optional leading "redo" keyword, optional session id
+        redo = False
+        session_id = None
+        for arg in args:
+            if arg.lower() == "redo":
+                redo = True
+            elif arg.isdigit():
+                session_id = int(arg)
+            else:
+                await ctx.send("Usage: `!recap [redo] [session_id]`")
+                return
+
         session = database.get_transcript_session(session_id)
         if session is None:
             await ctx.send("No voice sessions recorded yet." if session_id is None else f"Session #{session_id} not found.")
@@ -139,34 +158,28 @@ class LLM(commands.Cog):
         if status == "processing":
             await ctx.send(f"Session #{sid} is still being processed — check back in a moment.")
             return
-        if status == "failed":
+
+        # Force regeneration if redo requested or previous attempt failed
+        if redo or status == "failed":
             segments = database.get_transcript_segments(sid)
             if not segments:
-                await ctx.send(f"Session #{sid} failed and has no transcript data.")
+                await ctx.send(f"Session #{sid} has no transcript data to summarise.")
                 return
-            await ctx.send(f"Session #{sid} previously failed — retrying summary ({len(segments)} segments, may take a few minutes)...")
+            msg = "Regenerating" if redo else "Retrying"
+            await ctx.send(f"{msg} summary for session #{sid}... ({len(segments)} segments, may take a moment)")
             transcript_text = _build_transcript_text(segments)
             prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
             try:
                 summary = await _ollama_generate(prompt)
             except Exception:
-                log.exception("Ollama retry failed for session %d", sid)
-                await ctx.send(f"Summary generation failed again. Use `!transcript {sid}` to read the raw transcript.")
+                log.exception("Ollama recap failed for session %d", sid)
+                await ctx.send(f"Summary generation failed. Use `!transcript {sid}` to read the raw transcript.")
                 return
             database.set_transcript_summary(sid, summary)
-            started = session["started_at"][:16].replace("T", " ") + " UTC"
-            embed = discord.Embed(
-                title=f"Session #{sid} Recap — {session['channel_name']}",
-                description=summary,
-                color=discord.Color.blurple(),
-            )
-            embed.set_footer(text=f"Recorded {started} · !transcript {sid} for full text · Past our Prime Gamers")
-            await ctx.send(embed=embed)
-            return
+        else:
+            summary = session.get("summary") or "_No summary available._"
 
-        summary = session.get("summary") or "_No summary available._"
         started = session["started_at"][:16].replace("T", " ") + " UTC"
-
         embed = discord.Embed(
             title=f"Session #{sid} Recap — {session['channel_name']}",
             description=summary,
