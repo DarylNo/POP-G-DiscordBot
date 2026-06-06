@@ -19,21 +19,26 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 
 _TZ_TORONTO = ZoneInfo("America/Toronto")
 
-_SUMMARY_PROMPT = """\
-You are summarizing a voice chat session from a Discord gaming server called "Past our Prime Gamers" (POPG). \
-Members are older gamers who play together casually.
+_SUMMARY_SYSTEM = (
+    'You are a recap writer for "Past our Prime Gamers" (POPG), a Discord server of older casual gamers. '
+    "Write short, fun summaries of their voice chat sessions."
+)
 
-Below is a timestamped transcript. Write a short, fun summary: what was discussed, any games mentioned, \
+_SUMMARY_PROMPT = """\
+Write a short, fun summary of this voice chat session: what was discussed, any games mentioned, \
 notable moments or jokes. Keep it under 200 words and match the casual tone of the server.
 
 TRANSCRIPT:
 {transcript}"""
 
-_WHEN_PROMPT = """\
-You are analyzing Discord activity patterns for {display_name}, a member of "Past our Prime Gamers" (POPG), \
-a server of older casual gamers.
+_WHEN_SYSTEM = (
+    'You are analyzing Discord activity patterns for a member of "Past our Prime Gamers" (POPG), '
+    "a server of older casual gamers. Give concise, honest predictions based only on the data provided."
+)
 
-Today is {today} ({day_of_week}, Toronto time / ET).
+_WHEN_PROMPT = """\
+Member: {display_name}
+Today: {today} ({day_of_week}, Toronto time / ET)
 
 SESSION HISTORY — last {days} days (online/gaming sessions, Toronto time / ET):
 {session_list}
@@ -41,16 +46,16 @@ SESSION HISTORY — last {days} days (online/gaming sessions, Toronto time / ET)
 DAY-OF-WEEK BREAKDOWN (sessions per day, Mon–Sun):
 {day_summary}
 
-HOUR-OF-DAY BREAKDOWN (sessions per hour, 24h UTC):
+HOUR-OF-DAY BREAKDOWN (sessions per hour, 24h ET):
 {hour_summary}
 
 {gaming_section}\
-Based on this data, answer:
+Answer these three questions:
 1. What days and times is this person most likely to be online?
-2. Do you see any rotating shift pattern (e.g. schedule that repeats every 2 weeks)?
-3. When is the NEXT time they're most likely to appear online — be specific (day + rough time)?
+2. Do you see any rotating shift pattern (e.g. schedule repeating every 2 weeks)?
+3. When is the NEXT time they're most likely to appear — be specific (day + rough time in ET)?
 
-Be honest if data is too sparse for a confident prediction. Keep it under 200 words and write casually."""
+Be honest if data is too sparse. Keep it under 200 words, write casually."""
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
 
@@ -85,11 +90,14 @@ def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
     return pages or ["(empty)"]
 
 
-async def _ollama_generate(prompt: str) -> str:
+async def _ollama_generate(prompt: str, system: str = "") -> str:
+    payload: dict = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+    if system:
+        payload["system"] = system
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
             f"{OLLAMA_URL}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            json=payload,
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
         resp.raise_for_status()
@@ -112,7 +120,7 @@ class LLM(commands.Cog):
         prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
 
         try:
-            summary = await _ollama_generate(prompt)
+            summary = await _ollama_generate(prompt, system=_SUMMARY_SYSTEM)
         except Exception:
             log.exception("Ollama request failed for session %d", session_id)
             database.set_transcript_status(session_id, "failed")
@@ -170,7 +178,7 @@ class LLM(commands.Cog):
             transcript_text = _build_transcript_text(segments)
             prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
             try:
-                summary = await _ollama_generate(prompt)
+                summary = await _ollama_generate(prompt, system=_SUMMARY_SYSTEM)
             except Exception:
                 log.exception("Ollama recap failed for session %d", sid)
                 await ctx.send(f"Summary generation failed. Use `!transcript {sid}` to read the raw transcript.")
@@ -338,7 +346,7 @@ class LLM(commands.Cog):
         )
 
         try:
-            prediction = await _ollama_generate(prompt)
+            prediction = await _ollama_generate(prompt, system=_WHEN_SYSTEM)
         except Exception:
             log.exception("!when: Ollama failed for user %d", target.id)
             await status_msg.edit(content="Prediction failed — Ollama is not responding. Try again in a moment.")
