@@ -28,6 +28,10 @@ _USER_COMMANDS_BOTTOM = """
 **Ask the AI**
 `!chat <message>` — Ask the local LLM anything (alias `!ask`)
 
+**DM Conversations**
+Message me directly (no `!` prefix) for a continuous chat — I'll remember the conversation.
+`!reset` — Clear your DM conversation history and start fresh
+
 **Voice Recap**
 `!recap [id]` — LLM summary of last (or specific) voice session
 `!recap redo [id]` — Force-regenerate the LLM summary

@@ -8,6 +8,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
+import config
 import database
 from cogs.profile import _fmt_duration
 
@@ -19,6 +20,17 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 # Context window in tokens. Ollama defaults to 2048, which truncates long
 # transcripts — bump it so full voice sessions fit in the prompt.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+
+_DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",   "20"))   # user+assistant pairs kept
+_DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",  str(2 * 3600)))  # 2h idle expiry
+_DM_RATE_PERIOD       = int(os.getenv("DM_RATE_PERIOD",          "8"))    # min seconds between DM replies
+_DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",      "3000")) # cap single user message
+
+# Write-through in-memory cache over the dm_history DB table.
+# user_id → {"messages": list[dict], "last_active": datetime}
+_dm_sessions: dict[int, dict] = {}
+# user_id → datetime of last processed DM (rate limiting)
+_dm_last_message: dict[int, datetime] = {}
 
 _TZ_TORONTO = ZoneInfo("America/Toronto")
 
@@ -123,11 +135,33 @@ def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
     return pages or ["(empty)"]
 
 
-async def _ollama_generate(prompt: str, system: str = "") -> str:
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+def _get_dm_session(user_id: int) -> dict:
+    """Return the in-memory DM session for a user, loading from DB on cache miss.
+
+    Evicts expired sessions (idle > _DM_HISTORY_TTL) and starts fresh.
+    """
+    now = datetime.now(timezone.utc)
+    session = _dm_sessions.get(user_id)
+
+    if session is None:
+        stored = database.get_dm_history(user_id)
+        session = {"messages": stored, "last_active": now}
+        _dm_sessions[user_id] = session
+
+    if (now - session["last_active"]).total_seconds() > _DM_HISTORY_TTL:
+        session["messages"] = []
+        session["last_active"] = now
+        database.delete_dm_history(user_id)
+
+    return session
+
+
+async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list[dict] | None = None) -> str:
+    if messages is None:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
             f"{OLLAMA_URL}/api/chat",
@@ -431,6 +465,72 @@ class LLM(commands.Cog):
     async def chat_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"Slow down a sec — try again in {error.retry_after:.0f}s.")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+        if message.guild is not None:
+            return  # only handle DMs
+        if message.content.startswith(config.PREFIX):
+            return  # prefixed command — process_commands handles it
+
+        text = message.content.strip()
+        if not text:
+            await message.channel.send("I can only read text — send me something to chat about!")
+            return
+
+        # Rate limit
+        now = datetime.now(timezone.utc)
+        last = _dm_last_message.get(message.author.id)
+        if last is not None and (now - last).total_seconds() < _DM_RATE_PERIOD:
+            wait = _DM_RATE_PERIOD - (now - last).total_seconds()
+            await message.channel.send(f"Slow down — try again in {wait:.0f}s.")
+            return
+        _dm_last_message[message.author.id] = now
+
+        if len(text) > _DM_MAX_INPUT_CHARS:
+            text = text[:_DM_MAX_INPUT_CHARS]
+            log.warning("DM from user %d truncated to %d chars", message.author.id, _DM_MAX_INPUT_CHARS)
+
+        session = _get_dm_session(message.author.id)
+
+        full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
+        full_messages.extend(session["messages"])
+        full_messages.append({"role": "user", "content": text})
+
+        async with message.channel.typing():
+            try:
+                reply = await _ollama_generate(messages=full_messages)
+            except Exception:
+                log.exception("DM chat failed for user %d", message.author.id)
+                await message.channel.send("The AI isn't responding right now — try again in a moment.")
+                return
+
+        if not reply:
+            await message.channel.send("No response — try rephrasing.")
+            return
+
+        session["messages"].append({"role": "user",      "content": text})
+        session["messages"].append({"role": "assistant", "content": reply})
+        session["last_active"] = datetime.now(timezone.utc)
+        max_items = _DM_MAX_HISTORY_TURNS * 2
+        if len(session["messages"]) > max_items:
+            session["messages"] = session["messages"][-max_items:]
+        database.save_dm_history(message.author.id, session["messages"])
+
+        for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
+            await message.channel.send(chunk)
+
+    @commands.command(name="reset")
+    async def reset_dm(self, ctx: commands.Context) -> None:
+        """Clear your DM conversation history with the bot."""
+        if ctx.guild is not None:
+            await ctx.send("This command only works in DMs.")
+            return
+        _dm_sessions.pop(ctx.author.id, None)
+        database.delete_dm_history(ctx.author.id)
+        await ctx.send("History cleared — fresh start!")
 
     @when.error
     async def when_error(self, ctx: commands.Context, error: Exception) -> None:
