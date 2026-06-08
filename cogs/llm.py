@@ -16,6 +16,9 @@ log = logging.getLogger("popg.llm")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
+# Context window in tokens. Ollama defaults to 2048, which truncates long
+# transcripts — bump it so full voice sessions fit in the prompt.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 
 _TZ_TORONTO = ZoneInfo("America/Toronto")
 
@@ -98,7 +101,12 @@ async def _ollama_generate(prompt: str, system: str = "") -> str:
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
             f"{OLLAMA_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": messages,
+                "stream": False,
+                "options": {"num_ctx": OLLAMA_NUM_CTX},
+            },
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
         resp.raise_for_status()
