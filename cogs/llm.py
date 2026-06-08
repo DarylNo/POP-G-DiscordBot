@@ -60,7 +60,15 @@ Answer these three questions:
 
 Be honest if data is too sparse. Keep it under 200 words, write casually."""
 
+_CHAT_SYSTEM = (
+    'You are the assistant bot for "Past our Prime Gamers" (POPG), a Discord server of older '
+    "casual gamers. You are friendly, a little witty, and concise. Answer the user's question "
+    "directly. Keep replies under 250 words unless more detail is clearly needed."
+)
+
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
+
+_CHAT_REPLY_LIMIT = 1900  # Discord message hard limit is 2000; leave headroom
 
 
 def _fmt_timestamp(seconds: float) -> str:
@@ -77,6 +85,28 @@ def _build_transcript_text(segments: list[dict]) -> str:
         ts = _fmt_timestamp(seg["timestamp"])
         lines.append(f"[{ts}] {seg['display_name']}: {seg['text']}")
     return "\n".join(lines)
+
+
+def _chunk_text(text: str, limit: int) -> list[str]:
+    """Split text into chunks no longer than limit, preferring paragraph/line breaks.
+
+    Unlike _paginate, this guarantees no chunk exceeds the limit even when a
+    single line is longer than it (it hard-splits as a last resort).
+    """
+    chunks: list[str] = []
+    remaining = text.strip()
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        split = window.rfind("\n")
+        if split == -1:
+            split = window.rfind(" ")
+        if split == -1:
+            split = limit
+        chunks.append(remaining[:split].rstrip())
+        remaining = remaining[split:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks or ["(empty)"]
 
 
 def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
@@ -372,6 +402,35 @@ class LLM(commands.Cog):
         except discord.HTTPException:
             pass
         await ctx.send(embed=embed)
+
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.command(name="chat", aliases=["ask"])
+    async def chat(self, ctx: commands.Context, *, message: str = None) -> None:
+        """Ask the local LLM a question, e.g. !chat what's a good co-op game?"""
+        if not message:
+            await ctx.send("Ask me something: `!chat <your question>`")
+            return
+
+        async with ctx.typing():
+            try:
+                reply = await _ollama_generate(message, system=_CHAT_SYSTEM)
+            except Exception:
+                log.exception("!chat: Ollama failed for user %d", ctx.author.id)
+                await ctx.send("The LLM isn't responding right now. Try again in a moment.")
+                return
+
+        if not reply:
+            await ctx.send("I didn't get a response. Try rephrasing.")
+            return
+
+        # Discord caps messages at 2000 chars — split long replies across messages.
+        for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
+            await ctx.send(chunk)
+
+    @chat.error
+    async def chat_error(self, ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(f"Slow down a sec — try again in {error.retry_after:.0f}s.")
 
     @when.error
     async def when_error(self, ctx: commands.Context, error: Exception) -> None:
