@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from collections import defaultdict
@@ -196,6 +197,53 @@ async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list
         resp.raise_for_status()
         data = await resp.json()
     return data.get("message", {}).get("content", "").strip()
+
+
+_SEARCH_INTENT_SYSTEM = (
+    "Decide if answering the latest message would benefit from a current web search "
+    "(news, live data, recent events, specific facts you might not know). "
+    "If yes, reply with exactly: SEARCH: <concise search query> "
+    "If no, reply with exactly: NOOP"
+)
+
+_SEARCH_INTENT_TIMEOUT = 20  # seconds — fast check, don't wait long
+
+
+async def _maybe_search(history: list[dict], user_text: str) -> str | None:
+    """Ask the model if a web search would help. Returns the query string or None."""
+    intent_messages = [
+        {"role": "system", "content": _SEARCH_INTENT_SYSTEM},
+        *history[-4:],
+        {"role": "user", "content": user_text},
+    ]
+    try:
+        result = await asyncio.wait_for(
+            _ollama_generate(messages=intent_messages),
+            timeout=_SEARCH_INTENT_TIMEOUT,
+        )
+    except Exception:
+        log.warning("Search intent check failed — skipping search")
+        return None
+    if result.upper().startswith("SEARCH:"):
+        return result[7:].strip()
+    return None
+
+
+async def _web_search(query: str, max_results: int = 4) -> str:
+    """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
+    from duckduckgo_search import DDGS
+
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(
+            None, lambda: list(DDGS().text(query, max_results=max_results))
+        )
+    except Exception:
+        log.warning("DDG search failed for query: %s", query)
+        return ""
+    if not results:
+        return ""
+    return "\n".join(f"• {r['title']}: {r['body']}" for r in results)
 
 
 class LLM(commands.Cog):
@@ -469,16 +517,24 @@ class LLM(commands.Cog):
             # Guild channel — shared per-channel history; prefix message with who said it
             session = _get_ch_session(ctx.channel.id)
             user_content = f"{ctx.author.display_name}: {message}"
-            full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
-            full_messages.extend(session["messages"])
-            full_messages.append({"role": "user", "content": user_content})
         else:
             # DM via !chat — merge into the user's existing DM session
             session = _get_dm_session(ctx.author.id)
             user_content = message
-            full_messages = [{"role": "system", "content": _CHAT_SYSTEM}]
-            full_messages.extend(session["messages"])
-            full_messages.append({"role": "user", "content": user_content})
+
+        # Let the model decide if a web search would help
+        search_query = await _maybe_search(session["messages"], message)
+        call_content = user_content
+        if search_query:
+            snippets = await _web_search(search_query)
+            if snippets:
+                call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
+            else:
+                search_query = None
+
+        full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
+        full_messages.extend(session["messages"])
+        full_messages.append({"role": "user", "content": call_content})
 
         async with ctx.typing():
             try:
@@ -492,9 +548,10 @@ class LLM(commands.Cog):
             await ctx.send("I didn't get a response. Try rephrasing.")
             return
 
-        # Persist and trim history
+        # Persist clean user content; tag reply with what was searched so future turns know
+        stored_reply = f"[Searched: {search_query}] {reply}" if search_query else reply
         session["messages"].append({"role": "user",      "content": user_content})
-        session["messages"].append({"role": "assistant", "content": reply})
+        session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
         max_items = (_CH_MAX_HISTORY_TURNS if ctx.guild else _DM_MAX_HISTORY_TURNS) * 2
         if len(session["messages"]) > max_items:
@@ -541,9 +598,19 @@ class LLM(commands.Cog):
 
         session = _get_dm_session(message.author.id)
 
+        # Let the model decide if a web search would help
+        search_query = await _maybe_search(session["messages"], text)
+        call_content = text
+        if search_query:
+            snippets = await _web_search(search_query)
+            if snippets:
+                call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
+            else:
+                search_query = None
+
         full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
         full_messages.extend(session["messages"])
-        full_messages.append({"role": "user", "content": text})
+        full_messages.append({"role": "user", "content": call_content})
 
         async with message.channel.typing():
             try:
@@ -557,8 +624,9 @@ class LLM(commands.Cog):
             await message.channel.send("No response — try rephrasing.")
             return
 
+        stored_reply = f"[Searched: {search_query}] {reply}" if search_query else reply
         session["messages"].append({"role": "user",      "content": text})
-        session["messages"].append({"role": "assistant", "content": reply})
+        session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
         max_items = _DM_MAX_HISTORY_TURNS * 2
         if len(session["messages"]) > max_items:

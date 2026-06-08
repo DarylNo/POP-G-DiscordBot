@@ -3,3 +3,4 @@ python-dotenv>=1.0.0
 openai-whisper>=20231117
 # torch is installed separately in Dockerfile with CUDA index URL
 aiohttp>=3.9.0
+duckduckgo-search>=6.0
