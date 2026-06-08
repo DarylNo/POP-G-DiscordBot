@@ -12,6 +12,11 @@ log = logging.getLogger("popg.chat_logger")
 
 _ADMIN_DENY = "You need Administrator permission or the Admin role to use this."
 
+# Sentinel channel_id stored in watched_channels to mean "log every channel the
+# bot can see". Discord only delivers on_message for visible channels, so this
+# effectively logs everything readable, including channels created later.
+_WATCH_ALL = 0
+
 
 def _author_is_admin(ctx: commands.Context) -> bool:
     """Admin check that also works in DMs by resolving the author in the POPG guild."""
@@ -35,8 +40,13 @@ class ChatLogger(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
-        if message.channel.id not in self._watched:
+        if _WATCH_ALL not in self._watched and message.channel.id not in self._watched:
             return
+        # In watch-all mode, only log channels in the configured guild
+        if _WATCH_ALL in self._watched:
+            guild = getattr(message.channel, "guild", None)
+            if guild is None or guild.id != config.GUILD_ID:
+                return
         if not message.content:
             return
 
@@ -106,6 +116,8 @@ class ChatLogger(commands.Cog):
             await self._reply(ctx, _ADMIN_DENY)
             return
         cmds = (
+            "`!log all` — record every channel the bot can see\n"
+            "`!log none` — stop watch-all mode\n"
             "`!log watch <#channel|id>` — start recording a channel\n"
             "`!log unwatch <#channel|id>` — stop recording a channel\n"
             "`!log list` — show all recorded channels\n"
@@ -114,6 +126,34 @@ class ChatLogger(commands.Cog):
         )
         embed = discord.Embed(title="Chat Logging Commands", description=cmds, color=discord.Color.blue())
         await self._reply(ctx, embed=embed)
+
+    @log_group.command(name="all", aliases=["watchall"])
+    async def log_all(self, ctx: commands.Context) -> None:
+        """Record every channel the bot can see, including ones created later."""
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, _ADMIN_DENY)
+            return
+        if _WATCH_ALL in self._watched:
+            await self._reply(ctx, "Already recording all visible channels. Use `!log none` to stop.")
+            return
+        database.add_watched_channel(_WATCH_ALL, "ALL", ctx.author.id)
+        self._watched.add(_WATCH_ALL)
+        log.info("Watch-all mode enabled by %s", ctx.author)
+        await self._reply(ctx, "Now recording **all channels the bot can see** in the POPG server.")
+
+    @log_group.command(name="none", aliases=["unwatchall"])
+    async def log_none(self, ctx: commands.Context) -> None:
+        """Turn off watch-all mode. Individually watched channels are kept."""
+        if not _author_is_admin(ctx):
+            await self._reply(ctx, _ADMIN_DENY)
+            return
+        if _WATCH_ALL not in self._watched:
+            await self._reply(ctx, "Watch-all mode is not enabled.")
+            return
+        database.remove_watched_channel(_WATCH_ALL)
+        self._watched.discard(_WATCH_ALL)
+        log.info("Watch-all mode disabled by %s", ctx.author)
+        await self._reply(ctx, "Watch-all mode off. Any individually watched channels are still recorded.")
 
     @log_group.command(name="watch")
     async def log_watch(self, ctx: commands.Context, *, channel_ref: str = None) -> None:
@@ -173,7 +213,11 @@ class ChatLogger(commands.Cog):
         for ch in channels:
             adder = guild.get_member(ch["added_by"]) if guild else None
             adder_name = adder.display_name if adder else f"ID:{ch['added_by']}"
-            lines.append(f"• <#{ch['channel_id']}> — added by {adder_name} on {_fmt_dt(ch['added_at'])}")
+            if ch["channel_id"] == _WATCH_ALL:
+                label = "**ALL visible channels** (watch-all mode)"
+            else:
+                label = f"<#{ch['channel_id']}>"
+            lines.append(f"• {label} — added by {adder_name} on {_fmt_dt(ch['added_at'])}")
         embed.description = "\n".join(lines)
         await self._reply(ctx, embed=embed)
 

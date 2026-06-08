@@ -47,6 +47,8 @@ ADMIN_COMMANDS = """
 `!admin info @member` — Raw stat dump
 `!admin reset @member` — Zero out a member's stats
 `!admin reload <cog>` — Reload a cog without restarting
+`!log all` — Log every channel the bot can see
+`!log none` — Stop watch-all mode
 `!log watch <#channel|id>` — Start logging a channel
 `!log unwatch <#channel|id>` — Stop logging a channel
 `!log list` — Show watched channels
