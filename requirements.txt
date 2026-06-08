@@ -4,3 +4,4 @@ openai-whisper>=20231117
 # torch is installed separately in Dockerfile with CUDA index URL
 aiohttp>=3.9.0
 duckduckgo-search>=6.0
+beautifulsoup4>=4.12.0
