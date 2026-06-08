@@ -119,6 +119,12 @@ def init_db() -> None:
             text         TEXT    NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS dm_history (
+            user_id      INTEGER PRIMARY KEY,
+            messages     TEXT    NOT NULL DEFAULT '[]',
+            last_updated TEXT    NOT NULL
+        );
+
     """)
     # Migrations for existing databases
     for migration in [
@@ -758,6 +764,41 @@ def get_recent_messages(channel_id: int, limit: int = 100) -> list[dict]:
 def get_messages_for_llm(channel_id: int, limit: int = 200) -> list[dict]:
     """Return messages as plain dicts ready to serialize into an LLM prompt."""
     return get_recent_messages(channel_id, limit)
+
+
+# --- DM conversation history ---
+
+def get_dm_history(user_id: int) -> list[dict]:
+    """Load stored DM conversation history for a user. Returns [] if none."""
+    import json
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT messages FROM dm_history WHERE user_id=?", (user_id,)
+    ).fetchone()
+    if row is None:
+        return []
+    try:
+        return json.loads(row["messages"])
+    except (ValueError, TypeError):
+        return []
+
+
+def save_dm_history(user_id: int, messages: list[dict]) -> None:
+    """Upsert the full conversation messages list for a user."""
+    import json
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO dm_history (user_id, messages, last_updated) VALUES (?, ?, ?)",
+        (user_id, json.dumps(messages), _now()),
+    )
+    conn.commit()
+
+
+def delete_dm_history(user_id: int) -> None:
+    """Delete stored DM history for a user."""
+    conn = get_conn()
+    conn.execute("DELETE FROM dm_history WHERE user_id=?", (user_id,))
+    conn.commit()
 
 
 # --- Voice transcription ---
