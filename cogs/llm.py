@@ -26,8 +26,7 @@ _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)
 _DM_RATE_PERIOD       = int(os.getenv("DM_RATE_PERIOD",             "8"))    # min seconds between DM replies
 _DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",         "3000")) # cap single user message
 
-_CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS",    "30"))   # more turns for shared channels
-_CH_HISTORY_TTL       = int(os.getenv("CHAT_HISTORY_TTL_SECONDS",  str(4 * 3600)))  # 4h idle expiry
+_CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS", "30"))   # more turns for shared channels
 
 # Write-through in-memory caches over the DB tables.
 # user_id → {"messages": list[dict], "last_active": datetime}
@@ -171,10 +170,7 @@ def _get_ch_session(channel_id: int) -> dict:
         session = {"messages": stored, "last_active": now}
         _ch_sessions[channel_id] = session
 
-    if (now - session["last_active"]).total_seconds() > _CH_HISTORY_TTL:
-        session["messages"] = []
-        session["last_active"] = now
-        database.delete_channel_chat_history(channel_id)
+    # No TTL — channel history persists indefinitely until !reset
 
     return session
 
