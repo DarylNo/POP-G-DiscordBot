@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -244,6 +245,41 @@ async def _web_search(query: str, max_results: int = 4) -> str:
     if not results:
         return ""
     return "\n".join(f"• {r['title']}: {r['body']}" for r in results)
+
+
+_URL_RE = re.compile(r"https?://[^\s>\"']+", re.IGNORECASE)
+_URL_FETCH_TIMEOUT = 10        # seconds per page
+_URL_MAX_CHARS     = 4000      # truncate page text to keep context manageable
+_URL_MAX_PER_MSG   = 2         # read at most this many URLs per message
+
+
+async def _fetch_url(url: str) -> str:
+    """Fetch a URL and return its readable text content, truncated to _URL_MAX_CHARS."""
+    from bs4 import BeautifulSoup
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; POPGBot/1.0)"}
+    timeout = aiohttp.ClientTimeout(total=_URL_FETCH_TIMEOUT)
+    try:
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    log.warning("URL fetch got HTTP %d for %s", resp.status, url)
+                    return ""
+                content_type = resp.headers.get("Content-Type", "")
+                if "html" not in content_type:
+                    return ""
+                html = await resp.text(errors="replace")
+    except Exception:
+        log.warning("URL fetch failed for %s", url)
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n", strip=True)
+    # Collapse excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text[:_URL_MAX_CHARS]
 
 
 class LLM(commands.Cog):
@@ -522,15 +558,26 @@ class LLM(commands.Cog):
             session = _get_dm_session(ctx.author.id)
             user_content = message
 
-        # Let the model decide if a web search would help
-        search_query = await _maybe_search(session["messages"], message)
+        # If the message contains URLs, fetch them; otherwise let the model decide to search
+        urls = _URL_RE.findall(message)[:_URL_MAX_PER_MSG]
+        context_tag = None
         call_content = user_content
-        if search_query:
-            snippets = await _web_search(search_query)
-            if snippets:
-                call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
-            else:
-                search_query = None
+        if urls:
+            pages = []
+            for url in urls:
+                page_text = await _fetch_url(url)
+                if page_text:
+                    pages.append(f"[Content of {url}]\n{page_text}")
+            if pages:
+                call_content = "\n\n".join(pages) + f"\n\n{user_content}"
+                context_tag = "Read: " + ", ".join(urls)
+        else:
+            search_query = await _maybe_search(session["messages"], message)
+            if search_query:
+                snippets = await _web_search(search_query)
+                if snippets:
+                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
+                    context_tag = f"Searched: {search_query}"
 
         full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
         full_messages.extend(session["messages"])
@@ -548,8 +595,7 @@ class LLM(commands.Cog):
             await ctx.send("I didn't get a response. Try rephrasing.")
             return
 
-        # Persist clean user content; tag reply with what was searched so future turns know
-        stored_reply = f"[Searched: {search_query}] {reply}" if search_query else reply
+        stored_reply = f"[{context_tag}] {reply}" if context_tag else reply
         session["messages"].append({"role": "user",      "content": user_content})
         session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
@@ -598,15 +644,26 @@ class LLM(commands.Cog):
 
         session = _get_dm_session(message.author.id)
 
-        # Let the model decide if a web search would help
-        search_query = await _maybe_search(session["messages"], text)
+        # URLs in message → fetch pages; otherwise let the model decide to search
+        urls = _URL_RE.findall(text)[:_URL_MAX_PER_MSG]
+        context_tag = None
         call_content = text
-        if search_query:
-            snippets = await _web_search(search_query)
-            if snippets:
-                call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
-            else:
-                search_query = None
+        if urls:
+            pages = []
+            for url in urls:
+                page_text = await _fetch_url(url)
+                if page_text:
+                    pages.append(f"[Content of {url}]\n{page_text}")
+            if pages:
+                call_content = "\n\n".join(pages) + f"\n\n{text}"
+                context_tag = "Read: " + ", ".join(urls)
+        else:
+            search_query = await _maybe_search(session["messages"], text)
+            if search_query:
+                snippets = await _web_search(search_query)
+                if snippets:
+                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
+                    context_tag = f"Searched: {search_query}"
 
         full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
         full_messages.extend(session["messages"])
@@ -624,7 +681,7 @@ class LLM(commands.Cog):
             await message.channel.send("No response — try rephrasing.")
             return
 
-        stored_reply = f"[Searched: {search_query}] {reply}" if search_query else reply
+        stored_reply = f"[{context_tag}] {reply}" if context_tag else reply
         session["messages"].append({"role": "user",      "content": text})
         session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
