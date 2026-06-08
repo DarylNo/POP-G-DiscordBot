@@ -125,6 +125,12 @@ def init_db() -> None:
             last_updated TEXT    NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS channel_chat_history (
+            channel_id   INTEGER PRIMARY KEY,
+            messages     TEXT    NOT NULL DEFAULT '[]',
+            last_updated TEXT    NOT NULL
+        );
+
     """)
     # Migrations for existing databases
     for migration in [
@@ -798,6 +804,39 @@ def delete_dm_history(user_id: int) -> None:
     """Delete stored DM history for a user."""
     conn = get_conn()
     conn.execute("DELETE FROM dm_history WHERE user_id=?", (user_id,))
+    conn.commit()
+
+
+def get_channel_chat_history(channel_id: int) -> list[dict]:
+    """Load stored !chat conversation history for a channel. Returns [] if none."""
+    import json
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT messages FROM channel_chat_history WHERE channel_id=?", (channel_id,)
+    ).fetchone()
+    if row is None:
+        return []
+    try:
+        return json.loads(row["messages"])
+    except (ValueError, TypeError):
+        return []
+
+
+def save_channel_chat_history(channel_id: int, messages: list[dict]) -> None:
+    """Upsert the full !chat messages list for a channel."""
+    import json
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO channel_chat_history (channel_id, messages, last_updated) VALUES (?, ?, ?)",
+        (channel_id, json.dumps(messages), _now()),
+    )
+    conn.commit()
+
+
+def delete_channel_chat_history(channel_id: int) -> None:
+    """Delete stored !chat history for a channel."""
+    conn = get_conn()
+    conn.execute("DELETE FROM channel_chat_history WHERE channel_id=?", (channel_id,))
     conn.commit()
 
 

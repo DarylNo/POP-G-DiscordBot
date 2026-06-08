@@ -21,14 +21,19 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 # transcripts — bump it so full voice sessions fit in the prompt.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 
-_DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",   "20"))   # user+assistant pairs kept
-_DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",  str(2 * 3600)))  # 2h idle expiry
-_DM_RATE_PERIOD       = int(os.getenv("DM_RATE_PERIOD",          "8"))    # min seconds between DM replies
-_DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",      "3000")) # cap single user message
+_DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",      "20"))   # user+assistant pairs kept
+_DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)))  # 2h idle expiry
+_DM_RATE_PERIOD       = int(os.getenv("DM_RATE_PERIOD",             "8"))    # min seconds between DM replies
+_DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",         "3000")) # cap single user message
 
-# Write-through in-memory cache over the dm_history DB table.
+_CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS",    "30"))   # more turns for shared channels
+_CH_HISTORY_TTL       = int(os.getenv("CHAT_HISTORY_TTL_SECONDS",  str(4 * 3600)))  # 4h idle expiry
+
+# Write-through in-memory caches over the DB tables.
 # user_id → {"messages": list[dict], "last_active": datetime}
 _dm_sessions: dict[int, dict] = {}
+# channel_id → {"messages": list[dict], "last_active": datetime}
+_ch_sessions: dict[int, dict] = {}
 # user_id → datetime of last processed DM (rate limiting)
 _dm_last_message: dict[int, datetime] = {}
 
@@ -152,6 +157,24 @@ def _get_dm_session(user_id: int) -> dict:
         session["messages"] = []
         session["last_active"] = now
         database.delete_dm_history(user_id)
+
+    return session
+
+
+def _get_ch_session(channel_id: int) -> dict:
+    """Return the in-memory channel chat session, loading from DB on cache miss."""
+    now = datetime.now(timezone.utc)
+    session = _ch_sessions.get(channel_id)
+
+    if session is None:
+        stored = database.get_channel_chat_history(channel_id)
+        session = {"messages": stored, "last_active": now}
+        _ch_sessions[channel_id] = session
+
+    if (now - session["last_active"]).total_seconds() > _CH_HISTORY_TTL:
+        session["messages"] = []
+        session["last_active"] = now
+        database.delete_channel_chat_history(channel_id)
 
     return session
 
@@ -445,9 +468,24 @@ class LLM(commands.Cog):
             await ctx.send("Ask me something: `!chat <your question>`")
             return
 
+        if ctx.guild is not None:
+            # Guild channel — shared per-channel history; prefix message with who said it
+            session = _get_ch_session(ctx.channel.id)
+            user_content = f"{ctx.author.display_name}: {message}"
+            full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
+            full_messages.extend(session["messages"])
+            full_messages.append({"role": "user", "content": user_content})
+        else:
+            # DM via !chat — merge into the user's existing DM session
+            session = _get_dm_session(ctx.author.id)
+            user_content = message
+            full_messages = [{"role": "system", "content": _CHAT_SYSTEM}]
+            full_messages.extend(session["messages"])
+            full_messages.append({"role": "user", "content": user_content})
+
         async with ctx.typing():
             try:
-                reply = await _ollama_generate(message, system=_CHAT_SYSTEM)
+                reply = await _ollama_generate(messages=full_messages)
             except Exception:
                 log.exception("!chat: Ollama failed for user %d", ctx.author.id)
                 await ctx.send("The LLM isn't responding right now. Try again in a moment.")
@@ -457,7 +495,18 @@ class LLM(commands.Cog):
             await ctx.send("I didn't get a response. Try rephrasing.")
             return
 
-        # Discord caps messages at 2000 chars — split long replies across messages.
+        # Persist and trim history
+        session["messages"].append({"role": "user",      "content": user_content})
+        session["messages"].append({"role": "assistant", "content": reply})
+        session["last_active"] = datetime.now(timezone.utc)
+        max_items = (_CH_MAX_HISTORY_TURNS if ctx.guild else _DM_MAX_HISTORY_TURNS) * 2
+        if len(session["messages"]) > max_items:
+            session["messages"] = session["messages"][-max_items:]
+        if ctx.guild:
+            database.save_channel_chat_history(ctx.channel.id, session["messages"])
+        else:
+            database.save_dm_history(ctx.author.id, session["messages"])
+
         for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
             await ctx.send(chunk)
 
@@ -524,13 +573,19 @@ class LLM(commands.Cog):
 
     @commands.command(name="reset")
     async def reset_dm(self, ctx: commands.Context) -> None:
-        """Clear your DM conversation history with the bot."""
+        """Clear DM conversation history (DMs) or this channel's !chat history (admins)."""
         if ctx.guild is not None:
-            await ctx.send("This command only works in DMs.")
-            return
-        _dm_sessions.pop(ctx.author.id, None)
-        database.delete_dm_history(ctx.author.id)
-        await ctx.send("History cleared — fresh start!")
+            from cogs.admin import _is_admin
+            if not _is_admin(ctx):
+                await ctx.send("Only admins can reset a channel's chat history.")
+                return
+            _ch_sessions.pop(ctx.channel.id, None)
+            database.delete_channel_chat_history(ctx.channel.id)
+            await ctx.send("Channel chat history cleared — fresh start!")
+        else:
+            _dm_sessions.pop(ctx.author.id, None)
+            database.delete_dm_history(ctx.author.id)
+            await ctx.send("History cleared — fresh start!")
 
     @when.error
     async def when_error(self, ctx: commands.Context, error: Exception) -> None:
