@@ -25,6 +25,9 @@ _USER_COMMANDS_TOP = """
 _WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online"
 
 _USER_COMMANDS_BOTTOM = """
+**Ask the AI**
+`!chat <message>` — Ask the local LLM anything (alias `!ask`)
+
 **Voice Recap**
 `!recap [id]` — LLM summary of last (or specific) voice session
 `!recap redo [id]` — Force-regenerate the LLM summary
