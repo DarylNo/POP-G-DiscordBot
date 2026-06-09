@@ -131,6 +131,13 @@ def init_db() -> None:
             last_updated TEXT    NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS memories (
+            scope_type TEXT    NOT NULL,  -- 'guild' or 'dm'
+            scope_id   INTEGER NOT NULL,  -- guild_id or user_id
+            content    TEXT    NOT NULL DEFAULT '[]',
+            PRIMARY KEY (scope_type, scope_id)
+        );
+
     """)
     # Migrations for existing databases
     for migration in [
@@ -837,6 +844,45 @@ def delete_channel_chat_history(channel_id: int) -> None:
     """Delete stored !chat history for a channel."""
     conn = get_conn()
     conn.execute("DELETE FROM channel_chat_history WHERE channel_id=?", (channel_id,))
+    conn.commit()
+
+
+# --- Persistent memories ---
+
+def get_memories(scope_type: str, scope_id: int) -> list[str]:
+    """Load memories for a guild or DM scope. Returns [] if none stored."""
+    import json
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT content FROM memories WHERE scope_type=? AND scope_id=?",
+        (scope_type, scope_id),
+    ).fetchone()
+    if row:
+        try:
+            return json.loads(row["content"])
+        except Exception:
+            return []
+    return []
+
+
+def save_memories(scope_type: str, scope_id: int, memories: list[str]) -> None:
+    """Upsert the full memories list for a scope."""
+    import json
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO memories (scope_type, scope_id, content) VALUES (?, ?, ?)",
+        (scope_type, scope_id, json.dumps(memories)),
+    )
+    conn.commit()
+
+
+def delete_memories(scope_type: str, scope_id: int) -> None:
+    """Delete all memories for a scope."""
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM memories WHERE scope_type=? AND scope_id=?",
+        (scope_type, scope_id),
+    )
     conn.commit()
 
 

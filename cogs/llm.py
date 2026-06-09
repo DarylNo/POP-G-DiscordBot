@@ -282,6 +282,84 @@ async def _fetch_url(url: str) -> str:
     return text[:_URL_MAX_CHARS]
 
 
+_MEMORY_EXTRACT_SYSTEM = (
+    "Extract any facts worth remembering long-term from this exchange. "
+    "Focus on: names, characters, events, decisions, ongoing storylines, preferences, "
+    "inside jokes, game sessions, relationships. "
+    "Reply with a concise bullet list. If nothing notable, reply with exactly: NONE"
+)
+
+_MEMORY_CONSOLIDATE_SYSTEM = (
+    "Consolidate this memory list by merging related facts and removing redundant or "
+    "outdated entries. Keep the most specific and useful details. "
+    "Reply with a bullet list only."
+)
+
+_MEMORY_EXTRACT_TIMEOUT = 20  # seconds
+_MEMORY_MAX  = 150  # consolidate when list exceeds this
+_MEMORY_TARGET = 60  # target size after consolidation
+
+
+async def _extract_memories(exchange: list[dict]) -> list[str]:
+    """Extract memorable facts from a user+assistant exchange. Returns [] if nothing notable."""
+    try:
+        result = await asyncio.wait_for(
+            _ollama_generate(messages=[
+                {"role": "system", "content": _MEMORY_EXTRACT_SYSTEM},
+                *exchange,
+            ]),
+            timeout=_MEMORY_EXTRACT_TIMEOUT,
+        )
+    except Exception:
+        log.warning("Memory extraction failed — skipping")
+        return []
+    if not result or result.strip().upper() == "NONE":
+        return []
+    lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
+    return [l for l in lines if l and l.upper() != "NONE"]
+
+
+async def _consolidate_memories(memories: list[str]) -> list[str]:
+    """Ask the model to condense a large memory list."""
+    bullet_list = "\n".join(f"• {m}" for m in memories)
+    try:
+        result = await asyncio.wait_for(
+            _ollama_generate(messages=[
+                {"role": "system", "content": _MEMORY_CONSOLIDATE_SYSTEM},
+                {"role": "user", "content": bullet_list},
+            ]),
+            timeout=_MEMORY_EXTRACT_TIMEOUT,
+        )
+    except Exception:
+        log.warning("Memory consolidation failed — keeping existing")
+        return memories[-_MEMORY_TARGET:]
+    lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
+    condensed = [l for l in lines if l]
+    return condensed if condensed else memories[-_MEMORY_TARGET:]
+
+
+async def _update_memories(scope_type: str, scope_id: int, exchange: list[dict]) -> None:
+    """Extract new facts from an exchange and persist them. Consolidates if list grows too long."""
+    new_facts = await _extract_memories(exchange)
+    if not new_facts:
+        return
+    existing = database.get_memories(scope_type, scope_id)
+    combined = existing + new_facts
+    if len(combined) > _MEMORY_MAX:
+        log.info("Memory list for %s/%d hit %d — consolidating", scope_type, scope_id, len(combined))
+        combined = await _consolidate_memories(combined)
+    database.save_memories(scope_type, scope_id, combined)
+    log.debug("Stored %d new memories for %s/%d (total: %d)", len(new_facts), scope_type, scope_id, len(combined))
+
+
+def _build_memory_block(scope_type: str, scope_id: int) -> str:
+    """Return a formatted memory injection string, or empty string if no memories."""
+    memories = database.get_memories(scope_type, scope_id)
+    if not memories:
+        return ""
+    return "\n\nThings you remember:\n" + "\n".join(f"• {m}" for m in memories)
+
+
 class LLM(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -550,11 +628,11 @@ class LLM(commands.Cog):
             return
 
         if ctx.guild is not None:
-            # Guild channel — shared per-channel history; prefix message with who said it
+            scope_type, scope_id = "guild", config.GUILD_ID
             session = _get_ch_session(ctx.channel.id)
             user_content = f"{ctx.author.display_name}: {message}"
         else:
-            # DM via !chat — merge into the user's existing DM session
+            scope_type, scope_id = "dm", ctx.author.id
             session = _get_dm_session(ctx.author.id)
             user_content = message
 
@@ -579,7 +657,8 @@ class LLM(commands.Cog):
                     call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
                     context_tag = f"Searched: {search_query}"
 
-        full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
+        system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id)
+        full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(session["messages"])
         full_messages.append({"role": "user", "content": call_content})
 
@@ -609,6 +688,12 @@ class LLM(commands.Cog):
 
         for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
             await ctx.send(chunk)
+
+        # Extract and store memories in the background — don't make the user wait
+        asyncio.create_task(_update_memories(scope_type, scope_id, [
+            {"role": "user",      "content": user_content},
+            {"role": "assistant", "content": reply},
+        ]))
 
     @chat.error
     async def chat_error(self, ctx: commands.Context, error: Exception) -> None:
@@ -665,7 +750,8 @@ class LLM(commands.Cog):
                     call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
                     context_tag = f"Searched: {search_query}"
 
-        full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM}]
+        system_with_memory = _CHAT_SYSTEM + _build_memory_block("dm", message.author.id)
+        full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(session["messages"])
         full_messages.append({"role": "user", "content": call_content})
 
@@ -693,6 +779,11 @@ class LLM(commands.Cog):
         for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
             await message.channel.send(chunk)
 
+        asyncio.create_task(_update_memories("dm", message.author.id, [
+            {"role": "user",      "content": text},
+            {"role": "assistant", "content": reply},
+        ]))
+
     @commands.command(name="reset")
     async def reset_dm(self, ctx: commands.Context) -> None:
         """Clear DM conversation history (DMs) or this channel's !chat history (admins)."""
@@ -703,11 +794,13 @@ class LLM(commands.Cog):
                 return
             _ch_sessions.pop(ctx.channel.id, None)
             database.delete_channel_chat_history(ctx.channel.id)
-            await ctx.send("Channel chat history cleared — fresh start!")
+            database.delete_memories("guild", config.GUILD_ID)
+            await ctx.send("Channel chat history and server memories cleared — fresh start!")
         else:
             _dm_sessions.pop(ctx.author.id, None)
             database.delete_dm_history(ctx.author.id)
-            await ctx.send("History cleared — fresh start!")
+            database.delete_memories("dm", ctx.author.id)
+            await ctx.send("History and memories cleared — fresh start!")
 
     @when.error
     async def when_error(self, ctx: commands.Context, error: Exception) -> None:
