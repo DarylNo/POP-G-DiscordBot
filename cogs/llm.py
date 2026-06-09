@@ -201,12 +201,14 @@ async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list
 
 
 _SEARCH_INTENT_SYSTEM = (
-    "Decide if answering the latest message would benefit from a current web search. "
-    "When in doubt, search — it's better to search unnecessarily than to give outdated info. "
-    "Always search for: patch notes, game updates, current meta, prices, recent news, "
-    "anything with words like 'today', 'latest', 'new', 'current', 'now', 'patch', 'update', 'release'. "
-    "If yes, reply with exactly: SEARCH: <concise search query> "
-    "If no, reply with exactly: NOOP"
+    "You are evaluating whether you can confidently answer a question from your training data alone. "
+    "Ask yourself: Is this about something that changes over time — game patches, prices, news, "
+    "current events, recent releases, live data? Could your training data be outdated or incomplete "
+    "for this specific question? If there is any doubt about whether your knowledge is current and "
+    "accurate enough to give a genuinely useful answer, you should search. "
+    "If you would need to search to give a confident, up-to-date answer, reply with exactly: "
+    "SEARCH: <concise search query tailored to what you actually need to know> "
+    "If you are fully confident your training data covers this accurately, reply with exactly: NOOP"
 )
 
 # Keywords that always trigger a search, bypassing the intent check
