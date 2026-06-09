@@ -201,17 +201,35 @@ async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list
 
 
 _SEARCH_INTENT_SYSTEM = (
-    "Decide if answering the latest message would benefit from a current web search "
-    "(news, live data, recent events, specific facts you might not know). "
+    "Decide if answering the latest message would benefit from a current web search. "
+    "When in doubt, search — it's better to search unnecessarily than to give outdated info. "
+    "Always search for: patch notes, game updates, current meta, prices, recent news, "
+    "anything with words like 'today', 'latest', 'new', 'current', 'now', 'patch', 'update', 'release'. "
     "If yes, reply with exactly: SEARCH: <concise search query> "
     "If no, reply with exactly: NOOP"
+)
+
+# Keywords that always trigger a search, bypassing the intent check
+_SEARCH_FORCE_PATTERNS = re.compile(
+    r"\b(today|tonight|right now|currently|latest|newest|patch|hotfix|update|"
+    r"meta|tier list|just released|out now|new season|announced|patch notes|"
+    r"202[4-9])\b",
+    re.IGNORECASE,
 )
 
 _SEARCH_INTENT_TIMEOUT = 20  # seconds — fast check, don't wait long
 
 
 async def _maybe_search(history: list[dict], user_text: str) -> str | None:
-    """Ask the model if a web search would help. Returns the query string or None."""
+    """Ask the model if a web search would help. Returns the query string or None.
+
+    Bypasses the Ollama intent check for messages that obviously need current info.
+    """
+    # Fast path: keywords that always need a search
+    if _SEARCH_FORCE_PATTERNS.search(user_text):
+        log.debug("Search forced by keyword match for: %s", user_text[:80])
+        return user_text  # use the raw message as the search query
+
     intent_messages = [
         {"role": "system", "content": _SEARCH_INTENT_SYSTEM},
         *history[-4:],
