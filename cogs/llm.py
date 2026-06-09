@@ -234,13 +234,13 @@ async def _web_search(query: str, max_results: int = 4) -> str:
     """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
     from duckduckgo_search import DDGS
 
-    loop = asyncio.get_event_loop()
+    def _sync_search() -> list:
+        return list(DDGS(timeout=8).text(query, max_results=max_results))
+
     try:
-        results = await loop.run_in_executor(
-            None, lambda: list(DDGS().text(query, max_results=max_results))
-        )
-    except Exception:
-        log.warning("DDG search failed for query: %s", query)
+        results = await asyncio.get_running_loop().run_in_executor(None, _sync_search)
+    except BaseException:
+        log.warning("DDG search failed for query: %s", query, exc_info=True)
         return ""
     if not results:
         return ""
