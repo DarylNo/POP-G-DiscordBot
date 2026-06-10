@@ -79,12 +79,13 @@ Answer these three questions:
 Be honest if data is too sparse. Keep it under 200 words, write casually."""
 
 _CHAT_SYSTEM = (
-    "You are the assistant for the POPG Discord server, a private group of adult friends. "
+    "You are Toaster, the assistant for the POPG Discord server, a private group of adult friends. "
     "Answer questions directly and honestly. Mirror the tone of the conversation — stay neutral and "
     "professional if the chat is calm, but match the energy if people are casual or joking around. "
-    "No content warnings or disclaimers. Keep replies concise. "
-    "You have memories of past conversations, voice chat sessions, and gaming activity listed below — "
-    "always check them before saying you don't know something. If a memory covers the question, use it."
+    "No content warnings or disclaimers. Keep replies concise.\n"
+    "You have stored memories from past voice sessions, chat, and game history. "
+    "NEVER say you don't have access to voice chats or conversations — your memories ARE that access. "
+    "When a memory is relevant, use it to answer directly."
 )
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
@@ -388,15 +389,37 @@ async def _update_memories(scope_type: str, scope_id: int, exchange: list[dict])
     log.debug("Stored %d new memories for %s/%d (total: %d)", len(new_facts), scope_type, scope_id, len(combined))
 
 
+_MEMORY_STOPWORDS = {
+    "the", "and", "for", "was", "did", "what", "how", "are", "you", "can",
+    "will", "that", "this", "with", "from", "they", "have", "about", "talk",
+    "tell", "know", "who", "any", "all", "not", "get", "got", "its", "has",
+    "him", "her", "his", "our", "their", "today", "just", "like", "also",
+}
+
+
 def _build_memory_block(scope_type: str, scope_id: int) -> str:
     """Return a formatted memory injection string, or empty string if no memories."""
     memories = database.get_memories(scope_type, scope_id)
     if not memories:
         return ""
     return (
-        "\n\nYour memories (from past voice sessions, chat, and game history — use these to answer questions):\n"
+        "\n\nAll stored memories (voice sessions, chat history, game activity):\n"
         + "\n".join(f"• {m}" for m in memories)
     )
+
+
+def _find_relevant_memories(scope_type: str, scope_id: int, query: str) -> list[str]:
+    """Return memories whose content overlaps with keywords in the query."""
+    memories = database.get_memories(scope_type, scope_id)
+    if not memories:
+        return []
+    words = {
+        w.lower() for w in re.findall(r"\b\w{3,}\b", query)
+        if w.lower() not in _MEMORY_STOPWORDS
+    }
+    if not words:
+        return []
+    return [m for m in memories if any(w in m.lower() for w in words)]
 
 
 async def _extract_transcript_memories(session_id: int, segments: list[dict]) -> None:
@@ -761,6 +784,7 @@ class LLM(commands.Cog):
         urls = _URL_RE.findall(message)[:_URL_MAX_PER_MSG]
         context_tag = None
         call_content = user_content
+        relevant_mems: list[str] = []
         if urls:
             pages = []
             for url in urls:
@@ -771,16 +795,25 @@ class LLM(commands.Cog):
                 call_content = "\n\n".join(pages) + f"\n\n{user_content}"
                 context_tag = "Read: " + ", ".join(urls)
         else:
-            search_query = await _maybe_search(session["messages"], message)
-            if search_query:
-                snippets = await _web_search(search_query)
-                if snippets:
-                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
-                    context_tag = f"Searched: {search_query}"
+            # Skip web search if relevant memories already cover the question
+            relevant_mems = _find_relevant_memories(scope_type, scope_id, message)
+            if not relevant_mems:
+                search_query = await _maybe_search(session["messages"], message)
+                if search_query:
+                    snippets = await _web_search(search_query)
+                    if snippets:
+                        call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
+                        context_tag = f"Searched: {search_query}"
 
         system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(session["messages"])
+        # Inject relevant memories right before the question so they're impossible to miss
+        if relevant_mems:
+            full_messages.append({
+                "role": "system",
+                "content": "Relevant memories for this question:\n" + "\n".join(f"• {m}" for m in relevant_mems),
+            })
         full_messages.append({"role": "user", "content": call_content})
 
         async with ctx.typing():
@@ -854,6 +887,7 @@ class LLM(commands.Cog):
         urls = _URL_RE.findall(text)[:_URL_MAX_PER_MSG]
         context_tag = None
         call_content = text
+        dm_relevant_mems: list[str] = []
         if urls:
             pages = []
             for url in urls:
@@ -864,16 +898,23 @@ class LLM(commands.Cog):
                 call_content = "\n\n".join(pages) + f"\n\n{text}"
                 context_tag = "Read: " + ", ".join(urls)
         else:
-            search_query = await _maybe_search(session["messages"], text)
-            if search_query:
-                snippets = await _web_search(search_query)
-                if snippets:
-                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
-                    context_tag = f"Searched: {search_query}"
+            dm_relevant_mems = _find_relevant_memories("dm", message.author.id, text)
+            if not dm_relevant_mems:
+                search_query = await _maybe_search(session["messages"], text)
+                if search_query:
+                    snippets = await _web_search(search_query)
+                    if snippets:
+                        call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
+                        context_tag = f"Searched: {search_query}"
 
         system_with_memory = _CHAT_SYSTEM + _build_memory_block("dm", message.author.id)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(session["messages"])
+        if dm_relevant_mems:
+            full_messages.append({
+                "role": "system",
+                "content": "Relevant memories for this question:\n" + "\n".join(f"• {m}" for m in dm_relevant_mems),
+            })
         full_messages.append({"role": "user", "content": call_content})
 
         async with message.channel.typing():
