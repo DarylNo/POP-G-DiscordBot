@@ -82,7 +82,9 @@ _CHAT_SYSTEM = (
     "You are the assistant for the POPG Discord server, a private group of adult friends. "
     "Answer questions directly and honestly. Mirror the tone of the conversation — stay neutral and "
     "professional if the chat is calm, but match the energy if people are casual or joking around. "
-    "No content warnings or disclaimers. Keep replies concise."
+    "No content warnings or disclaimers. Keep replies concise. "
+    "You have memories of past conversations, voice chat sessions, and gaming activity listed below — "
+    "always check them before saying you don't know something. If a memory covers the question, use it."
 )
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
@@ -385,7 +387,10 @@ def _build_memory_block(scope_type: str, scope_id: int) -> str:
     memories = database.get_memories(scope_type, scope_id)
     if not memories:
         return ""
-    return "\n\nThings you remember:\n" + "\n".join(f"• {m}" for m in memories)
+    return (
+        "\n\nYour memories (from past voice sessions, chat, and game history — use these to answer questions):\n"
+        + "\n".join(f"• {m}" for m in memories)
+    )
 
 
 async def _extract_transcript_memories(session_id: int, segments: list[dict]) -> None:
