@@ -3,6 +3,7 @@ import logging
 import discord
 from discord.ext import commands
 
+import config
 import database
 from cogs.admin import _is_admin
 
@@ -72,7 +73,7 @@ class Utility(commands.Cog):
     async def ping(self, ctx: commands.Context) -> None:
         """Check if the bot is alive and show its latency."""
         latency_ms = round(self.bot.latency * 1000)
-        await ctx.send(f"Pong! `{latency_ms}ms`")
+        await ctx.send(f"Pong! `{latency_ms}ms` — v{config.VERSION}")
 
     @commands.command(name="help", aliases=["commands"])
     async def help(self, ctx: commands.Context) -> None:
