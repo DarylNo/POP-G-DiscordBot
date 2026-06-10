@@ -203,25 +203,31 @@ async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list
 
 
 _SEARCH_INTENT_SYSTEM = (
-    "You are evaluating whether you can confidently answer a question from your training data alone. "
-    "Ask yourself: Is this about something that changes over time — game patches, prices, news, "
-    "current events, recent releases, live data? Could your training data be outdated or incomplete "
-    "for this specific question? If there is any doubt about whether your knowledge is current and "
-    "accurate enough to give a genuinely useful answer, you should search. "
-    "If you would need to search to give a confident, up-to-date answer, reply with exactly: "
-    "SEARCH: <concise search query tailored to what you actually need to know> "
-    "If you are fully confident your training data covers this accurately, reply with exactly: NOOP"
+    "You decide whether to search the web before answering. Default to SEARCH.\n"
+    "Only reply NOOP if the question is clearly timeless — pure math, basic science, "
+    "how something works conceptually, or casual chat with no factual lookup needed.\n"
+    "Always search for:\n"
+    "- Anything about a specific game (weapons, builds, tier lists, strategies, meta, updates, DLC, servers)\n"
+    "- Prices, availability, release dates, store listings\n"
+    "- Current events, news, sports scores, weather\n"
+    "- Software, apps, hardware — versions, compatibility, errors, drivers\n"
+    "- Anything the user could google for a better answer than your training data\n"
+    "When in doubt, search. A search that wasn't needed costs nothing; a wrong answer does.\n"
+    "If you should search, reply with exactly: SEARCH: <concise search query>\n"
+    "If this is definitively a timeless question, reply with exactly: NOOP"
 )
 
 # Keywords that always trigger a search, bypassing the intent check
 _SEARCH_FORCE_PATTERNS = re.compile(
     r"\b(today|tonight|right now|currently|latest|newest|patch|hotfix|update|"
     r"meta|tier list|just released|out now|new season|announced|patch notes|"
-    r"202[4-9])\b",
+    r"202[4-9]|how much|price|cost|review|best build|loadout|weapon stats|"
+    r"coming out|release date|download|available now|server status|"
+    r"is .* down|when does|still worth|dead game)\b",
     re.IGNORECASE,
 )
 
-_SEARCH_INTENT_TIMEOUT = 20  # seconds — fast check, don't wait long
+_SEARCH_INTENT_TIMEOUT = 30  # seconds — fast check, don't wait long
 
 
 async def _maybe_search(history: list[dict], user_text: str) -> str | None:
@@ -317,7 +323,7 @@ _MEMORY_CONSOLIDATE_SYSTEM = (
     "Reply with a bullet list only."
 )
 
-_MEMORY_EXTRACT_TIMEOUT = 20  # seconds
+_MEMORY_EXTRACT_TIMEOUT = 60  # seconds — transcripts can be long; give Ollama room
 _MEMORY_MAX  = 150  # consolidate when list exceeds this
 _MEMORY_TARGET = 60  # target size after consolidation
 

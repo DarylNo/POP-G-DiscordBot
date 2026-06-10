@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+VERSION = "1.8.0"
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 PREFIX = os.getenv("PREFIX", "!")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
