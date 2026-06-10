@@ -941,17 +941,32 @@ class LLM(commands.Cog):
 
         msg = await ctx.send("Building memories from existing data… this may take a while.")
 
-        pending = database.get_transcripts_pending_memory()
+        try:
+            pending = database.get_transcripts_pending_memory()
+        except Exception as e:
+            await msg.edit(content=f"DB error — try `docker compose up -d --build` to apply the latest migration. (`{e}`)")
+            return
+
         await msg.edit(content=f"Processing {len(pending)} transcript(s) + game stats…")
 
+        failed = 0
         for row in pending:
-            segments = database.get_transcript_segments(row["id"])
-            await _extract_transcript_memories(row["id"], segments)
+            try:
+                segments = database.get_transcript_segments(row["id"])
+                await _extract_transcript_memories(row["id"], segments)
+            except Exception:
+                log.exception("memorybuild: failed on session %d", row["id"])
+                failed += 1
 
-        await _refresh_gaming_stats_memories()
+        try:
+            await _refresh_gaming_stats_memories()
+        except Exception:
+            log.exception("memorybuild: game stats refresh failed")
+            failed += 1
 
         memories = database.get_memories("guild", config.GUILD_ID)
-        await msg.edit(content=f"Done — {len(memories)} total memories in the guild pool.")
+        note = f" ({failed} error(s) — check logs)" if failed else ""
+        await msg.edit(content=f"Done — {len(memories)} total memories in the guild pool.{note}")
 
 
 def setup(bot: commands.Bot) -> None:
