@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 import database
@@ -319,6 +319,14 @@ _MEMORY_EXTRACT_TIMEOUT = 20  # seconds
 _MEMORY_MAX  = 150  # consolidate when list exceeds this
 _MEMORY_TARGET = 60  # target size after consolidation
 
+_TRANSCRIPT_MEMORY_SYSTEM = (
+    "Extract memorable facts from this voice chat transcript for long-term memory. "
+    "Focus on: who was present, what games were played, key events or decisions, "
+    "D&D/RPG campaign events and character actions, notable quotes or moments, "
+    "ongoing storylines or plans mentioned. "
+    "Reply with a concise bullet list. If nothing memorable, reply with exactly: NONE"
+)
+
 
 async def _extract_memories(exchange: list[dict]) -> list[str]:
     """Extract memorable facts from a user+assistant exchange. Returns [] if nothing notable."""
@@ -380,9 +388,88 @@ def _build_memory_block(scope_type: str, scope_id: int) -> str:
     return "\n\nThings you remember:\n" + "\n".join(f"• {m}" for m in memories)
 
 
+async def _extract_transcript_memories(session_id: int, segments: list[dict]) -> None:
+    """Extract memorable facts from a voice transcript and add them to guild memory."""
+    if not segments:
+        return
+    transcript_text = _build_transcript_text(segments)
+    try:
+        result = await asyncio.wait_for(
+            _ollama_generate(messages=[
+                {"role": "system", "content": _TRANSCRIPT_MEMORY_SYSTEM},
+                {"role": "user",   "content": transcript_text},
+            ]),
+            timeout=_MEMORY_EXTRACT_TIMEOUT,
+        )
+    except Exception:
+        log.warning("Transcript memory extraction failed for session %d", session_id)
+        return
+    if not result or result.strip().upper() == "NONE":
+        database.mark_transcript_memory_extracted(session_id)
+        return
+    lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
+    new_memories = [l for l in lines if l and l.upper() != "NONE"]
+    if new_memories:
+        existing = database.get_memories("guild", config.GUILD_ID)
+        combined = existing + new_memories
+        if len(combined) > _MEMORY_MAX:
+            combined = await _consolidate_memories(combined)
+        database.save_memories("guild", config.GUILD_ID, combined)
+        log.info("Session %d: extracted %d transcript memories", session_id, len(new_memories))
+    database.mark_transcript_memory_extracted(session_id)
+
+
+async def _refresh_gaming_stats_memories() -> None:
+    """Build per-user gaming stats from the DB and upsert them into guild memory."""
+    all_users = database.get_all_users()
+    stats_memories = []
+    for user in all_users:
+        uid = user["user_id"]
+        stats = database.get_user_stats(uid)
+        if not stats or not stats.get("top_games"):
+            continue
+        games_str = ", ".join(
+            f"{g['game_name']} ({_fmt_duration(g['total_seconds'])})"
+            for g in stats["top_games"][:3]
+        )
+        line = f"[Stats] {user['display_name']} plays: {games_str}"
+        accomplices = database.get_accomplices(uid, limit=2)
+        if accomplices:
+            partners = ", ".join(a["display_name"] for a in accomplices)
+            line += f"; often games with {partners}"
+        stats_memories.append(line)
+    if stats_memories:
+        existing = database.get_memories("guild", config.GUILD_ID)
+        filtered = [m for m in existing if not m.startswith("[Stats]")]
+        database.save_memories("guild", config.GUILD_ID, filtered + stats_memories)
+        log.info("Refreshed %d gaming stats memories", len(stats_memories))
+
+
 class LLM(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._daily_stats_task.start()
+
+    def cog_unload(self) -> None:
+        self._daily_stats_task.cancel()
+
+    @tasks.loop(hours=24)
+    async def _daily_stats_task(self) -> None:
+        await _refresh_gaming_stats_memories()
+
+    @_daily_stats_task.before_loop
+    async def _before_daily_stats(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Process any transcripts that completed before memory extraction was added."""
+        pending = database.get_transcripts_pending_memory()
+        if pending:
+            log.info("Processing %d transcript(s) pending memory extraction", len(pending))
+            for row in pending:
+                segments = database.get_transcript_segments(row["id"])
+                asyncio.create_task(_extract_transcript_memories(row["id"], segments))
 
     @commands.Cog.listener()
     async def on_transcript_ready(self, session_id: int) -> None:
@@ -403,6 +490,9 @@ class LLM(commands.Cog):
 
         database.set_transcript_summary(session_id, summary)
         log.info("Session %d: summary stored — use !recap to view.", session_id)
+
+        # Extract memories from this session in the background
+        asyncio.create_task(_extract_transcript_memories(session_id, segments))
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.command(name="recap")
@@ -838,6 +928,30 @@ class LLM(commands.Cog):
     async def transcript_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.BadArgument):
             await ctx.send("Usage: `!transcript [session_id]`")
+
+
+    @commands.guild_only()
+    @commands.command(name="memorybuild", aliases=["rebuildmemory"])
+    async def memorybuild(self, ctx: commands.Context) -> None:
+        """Admin: backfill memories from all existing transcripts and refresh game stats."""
+        from cogs.admin import _is_admin
+        if not _is_admin(ctx):
+            await ctx.send("Admin only.")
+            return
+
+        msg = await ctx.send("Building memories from existing data… this may take a while.")
+
+        pending = database.get_transcripts_pending_memory()
+        await msg.edit(content=f"Processing {len(pending)} transcript(s) + game stats…")
+
+        for row in pending:
+            segments = database.get_transcript_segments(row["id"])
+            await _extract_transcript_memories(row["id"], segments)
+
+        await _refresh_gaming_stats_memories()
+
+        memories = database.get_memories("guild", config.GUILD_ID)
+        await msg.edit(content=f"Done — {len(memories)} total memories in the guild pool.")
 
 
 def setup(bot: commands.Bot) -> None:

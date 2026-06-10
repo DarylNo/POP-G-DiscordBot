@@ -101,13 +101,14 @@ def init_db() -> None:
         );
 
         CREATE TABLE IF NOT EXISTS voice_transcripts (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id   INTEGER NOT NULL,
-            channel_name TEXT    NOT NULL,
-            started_at   TEXT    NOT NULL,
-            ended_at     TEXT,
-            status       TEXT    NOT NULL DEFAULT 'recording',
-            summary      TEXT
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id       INTEGER NOT NULL,
+            channel_name     TEXT    NOT NULL,
+            started_at       TEXT    NOT NULL,
+            ended_at         TEXT,
+            status           TEXT    NOT NULL DEFAULT 'recording',
+            summary          TEXT,
+            memory_extracted INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS transcript_segments (
@@ -144,6 +145,7 @@ def init_db() -> None:
         "ALTER TABLE users ADD COLUMN total_desktop_seconds INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN total_mobile_seconds INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN platform TEXT",
+        "ALTER TABLE voice_transcripts ADD COLUMN memory_extracted INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             conn.execute(migration)
@@ -955,6 +957,24 @@ def get_transcript_segments(session_id: int) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM transcript_segments WHERE session_id=? ORDER BY timestamp",
         (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_transcript_memory_extracted(session_id: int) -> None:
+    """Mark a voice session as having had memory extraction run."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE voice_transcripts SET memory_extracted=1 WHERE id=?", (session_id,)
+    )
+    conn.commit()
+
+
+def get_transcripts_pending_memory() -> list[dict]:
+    """Return completed sessions that haven't had memory extracted yet."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM voice_transcripts WHERE status='done' AND memory_extracted=0 ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 
