@@ -961,6 +961,15 @@ def get_transcript_segments(session_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def count_transcript_segments(session_id: int) -> int:
+    """Return the number of transcript segments stored for a session."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM transcript_segments WHERE session_id=?", (session_id,)
+    ).fetchone()
+    return row[0] if row else 0
+
+
 def mark_transcript_memory_extracted(session_id: int) -> None:
     """Mark a voice session as having had memory extraction run."""
     conn = get_conn()
