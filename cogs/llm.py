@@ -497,8 +497,14 @@ def _find_relevant_memories(scope_type: str, scope_id: int, query: str) -> list[
     return [m for m in memories if any(w in m.lower() for w in words)]
 
 
-async def _extract_transcript_memories(session_id: int, segments: list[dict]) -> None:
-    """Extract memorable facts from a voice transcript and add them to guild memory."""
+async def _extract_transcript_memories(
+    session_id: int, segments: list[dict], *, mark_extracted: bool = True
+) -> None:
+    """Extract memorable facts from a voice transcript and add them to guild memory.
+
+    mark_extracted=False is used for mid-session chunk events so the session
+    isn't prematurely marked done before the full transcript is processed.
+    """
     if not segments:
         return
     transcript_text = _build_transcript_text(segments)
@@ -514,7 +520,8 @@ async def _extract_transcript_memories(session_id: int, segments: list[dict]) ->
         log.warning("Transcript memory extraction failed for session %d", session_id)
         return
     if not result or result.strip().upper() == "NONE":
-        database.mark_transcript_memory_extracted(session_id)
+        if mark_extracted:
+            database.mark_transcript_memory_extracted(session_id)
         return
     lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
     new_memories = [l for l in lines if l and l.upper() != "NONE"]
@@ -524,8 +531,10 @@ async def _extract_transcript_memories(session_id: int, segments: list[dict]) ->
         if len(combined) > _MEMORY_MAX:
             combined = await _consolidate_memories(combined)
         database.save_memories("guild", config.GUILD_ID, combined)
-        log.info("Session %d: extracted %d transcript memories", session_id, len(new_memories))
-    database.mark_transcript_memory_extracted(session_id)
+        log.info("Session %d: extracted %d transcript memories (chunk=%s)",
+                 session_id, len(new_memories), not mark_extracted)
+    if mark_extracted:
+        database.mark_transcript_memory_extracted(session_id)
 
 
 async def _refresh_gaming_stats_memories() -> None:
@@ -602,8 +611,21 @@ class LLM(commands.Cog):
         database.set_transcript_summary(session_id, summary)
         log.info("Session %d: summary stored — use !recap to view.", session_id)
 
-        # Extract memories from this session in the background
+        # Extract memories from the full session in the background
         asyncio.create_task(_extract_transcript_memories(session_id, segments))
+
+    @commands.Cog.listener()
+    async def on_transcript_chunk_ready(self, session_id: int, segments: list[dict]) -> None:
+        """Fired by voice_listener after each rolling chunk is transcribed.
+
+        Extracts memories from the chunk immediately so the bot knows what's
+        being discussed during an active session — without waiting for !leave.
+        mark_extracted=False keeps the session available for full extraction later.
+        """
+        if segments:
+            asyncio.create_task(
+                _extract_transcript_memories(session_id, segments, mark_extracted=False)
+            )
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.command(name="recap")

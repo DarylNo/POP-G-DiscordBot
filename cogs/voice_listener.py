@@ -236,7 +236,7 @@ class VoiceListener(commands.Cog):
             database.close_transcript_session(session_id)
 
         # Transcribe the captured chunk
-        new_segments = await self._process_sink(sink, guild_id, session_id, chunk_wall_offset)
+        new_segs = await self._process_sink(sink, guild_id, session_id, chunk_wall_offset)
 
         if is_final:
             total = database.count_transcript_segments(session_id)
@@ -249,16 +249,19 @@ class VoiceListener(commands.Cog):
                      session_id, total)
             self.bot.dispatch("transcript_ready", session_id)
         else:
-            # Chunk rotation: restart recording on the same session
+            # Let the LLM cog extract memories from this chunk in the background
+            if new_segs:
+                self.bot.dispatch("transcript_chunk_ready", session_id, new_segs)
+
+            # Restart recording on the same session
             entry["chunk_start"] = _time.monotonic()
             entry["rotating"] = False
             try:
                 vc.start_recording(TimestampedSink(), self._recording_finished, guild_id)
                 log.info("Session %d: chunk done (%d new segs), resumed recording.",
-                         session_id, new_segments)
+                         session_id, len(new_segs))
             except Exception:
                 log.exception("Session %d: failed to restart recording after chunk rotation", session_id)
-                # Treat as final — don't leave the session in a broken state
                 self._active.pop(guild_id, None)
                 await vc.disconnect()
                 database.close_transcript_session(session_id)
@@ -275,10 +278,10 @@ class VoiceListener(commands.Cog):
         guild_id: int,
         session_id: int,
         chunk_wall_offset: float,
-    ) -> int:
-        """Transcribe all audio in a sink and store segments. Returns count of new segments."""
+    ) -> list[dict]:
+        """Transcribe all audio in a sink, store segments, return them as dicts."""
         if not sink.audio_data:
-            return 0
+            return []
 
         guild = self.bot.get_guild(guild_id)
         loop  = asyncio.get_event_loop()
@@ -292,7 +295,6 @@ class VoiceListener(commands.Cog):
                 member = guild.get_member(user_id) if guild else None
             display_name = member.display_name if member else str(user_id)
 
-            # first-packet offset within this chunk + chunk's position in the session
             user_chunk_offset = sink._user_offsets.get(user_id, 0.0)
             wall_base = chunk_wall_offset + user_chunk_offset
 
@@ -317,7 +319,8 @@ class VoiceListener(commands.Cog):
         for ts, uid, name, text in chunk_segments:
             database.add_transcript_segment(session_id, uid, name, ts, text)
 
-        return len(chunk_segments)
+        return [{"timestamp": ts, "display_name": name, "text": text}
+                for ts, uid, name, text in chunk_segments]
 
     # ------------------------------------------------------------------ #
     #  Error handlers                                                      #
