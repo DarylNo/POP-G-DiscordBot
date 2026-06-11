@@ -6,7 +6,7 @@ import time as _time
 from typing import Optional
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.sinks import WaveSink
 
 import database
@@ -100,7 +100,7 @@ class VoiceListener(commands.Cog):
     #  Chunk rotation task                                                 #
     # ------------------------------------------------------------------ #
 
-    @discord.ext.tasks.loop(seconds=30)
+    @tasks.loop(seconds=30)
     async def _chunk_rotator(self) -> None:
         """Rotate the audio buffer for any session that has hit VOICE_CHUNK_SECS."""
         for guild_id, entry in list(self._active.items()):
