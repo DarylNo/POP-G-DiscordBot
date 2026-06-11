@@ -45,6 +45,8 @@ _SUMMARY_SYSTEM = (
     "Write short, fun summaries of their voice chat sessions."
 )
 
+_SUMMARY_MAX_CHARS = 24000  # ~6k tokens — leaves room for prompt + response in 8k ctx
+
 _SUMMARY_PROMPT = """\
 Write a short, fun summary of this voice chat session: what was discussed, any games mentioned, \
 notable moments or jokes. Keep it under 200 words and match the casual tone of the server.
@@ -107,6 +109,17 @@ def _build_transcript_text(segments: list[dict]) -> str:
         ts = _fmt_timestamp(seg["timestamp"])
         lines.append(f"[{ts}] {seg['display_name']}: {seg['text']}")
     return "\n".join(lines)
+
+
+def _truncate_transcript(text: str, max_chars: int = _SUMMARY_MAX_CHARS) -> tuple[str, bool]:
+    """Truncate transcript to fit within model context. Returns (text, was_truncated)."""
+    if len(text) <= max_chars:
+        return text, False
+    # Keep the first 2/3 and last 1/3 so we capture both opening and closing
+    head = max_chars * 2 // 3
+    tail = max_chars - head
+    truncated = text[:head] + f"\n\n[... transcript truncated — {len(text) - max_chars} chars omitted ...]\n\n" + text[-tail:]
+    return truncated, True
 
 
 def _chunk_text(text: str, limit: int) -> list[str]:
@@ -512,13 +525,22 @@ class LLM(commands.Cog):
         if not segments:
             return
 
-        transcript_text = _build_transcript_text(segments)
+        raw_text = _build_transcript_text(segments)
+        transcript_text, truncated = _truncate_transcript(raw_text)
+        if truncated:
+            log.info("Session %d: transcript truncated for summary (%d → %d chars)",
+                     session_id, len(raw_text), len(transcript_text))
         prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
 
         try:
             summary = await _ollama_generate(prompt, system=_SUMMARY_SYSTEM)
         except Exception:
             log.exception("Ollama request failed for session %d", session_id)
+            database.set_transcript_status(session_id, "failed")
+            return
+
+        if not summary:
+            log.warning("Session %d: Ollama returned empty summary", session_id)
             database.set_transcript_status(session_id, "failed")
             return
 
@@ -573,14 +595,19 @@ class LLM(commands.Cog):
                 await ctx.send(f"Session #{sid} has no transcript data to summarise.")
                 return
             msg = "Regenerating" if redo else "Retrying"
-            await ctx.send(f"{msg} summary for session #{sid}... ({len(segments)} segments, may take a moment)")
-            transcript_text = _build_transcript_text(segments)
+            raw_text = _build_transcript_text(segments)
+            transcript_text, truncated = _truncate_transcript(raw_text)
+            trunc_note = f", truncated from {len(segments)} segments to fit context" if truncated else f", {len(segments)} segments"
+            await ctx.send(f"{msg} summary for session #{sid}…{trunc_note}, may take a moment")
             prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
             try:
                 summary = await _ollama_generate(prompt, system=_SUMMARY_SYSTEM)
             except Exception:
                 log.exception("Ollama recap failed for session %d", sid)
                 await ctx.send(f"Summary generation failed. Use `!transcript {sid}` to read the raw transcript.")
+                return
+            if not summary:
+                await ctx.send(f"Ollama returned an empty response. The transcript may still be too large — try `!transcript {sid}` to read it directly.")
                 return
             database.set_transcript_summary(sid, summary)
         else:
