@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time as _time
 from typing import Optional
 
 import discord
@@ -23,6 +24,28 @@ except ImportError:
     _whisper = None
     _WHISPER_AVAILABLE = False
     log.warning("openai-whisper not installed — voice transcription disabled")
+
+
+class TimestampedSink(WaveSink):
+    """WaveSink that records when each user's first audio packet arrives.
+
+    Discord only sends voice packets while a user is speaking (no silence).
+    Each user's WAV is therefore speech-only, and Whisper's timestamps are
+    relative to that speech buffer — not wall-clock time.  By recording the
+    monotonic offset of each user's first packet we can anchor their Whisper
+    timestamps to the real session timeline.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._start: float = _time.monotonic()
+        self._user_offsets: dict[int, float] = {}
+
+    def write(self, data: bytes, user) -> None:
+        uid = user.id if hasattr(user, "id") else int(user)
+        if uid not in self._user_offsets:
+            self._user_offsets[uid] = _time.monotonic() - self._start
+        super().write(data, user)
 
 
 def _transcribe(model, audio_bytes: bytes) -> list[dict]:
@@ -96,7 +119,7 @@ class VoiceListener(commands.Cog):
         session_id = database.open_transcript_session(target.id, target.name)
         self._active[ctx.guild.id] = (vc, session_id, ctx.channel)
         try:
-            vc.start_recording(WaveSink(), self._recording_finished, ctx.guild.id)
+            vc.start_recording(TimestampedSink(), self._recording_finished, ctx.guild.id)
         except Exception as e:
             self._active.pop(ctx.guild.id, None)
             database.close_transcript_session(session_id)
@@ -149,6 +172,9 @@ class VoiceListener(commands.Cog):
                 member = guild.get_member(user_id) if guild else None
             display_name = member.display_name if member else str(user_id)
 
+            # Wall-clock offset: when did this user's first audio packet arrive?
+            wall_offset = sink._user_offsets.get(user_id, 0.0)
+
             audio_data.file.seek(0)
             audio_bytes = audio_data.file.read()
             if len(audio_bytes) < 4096:  # skip near-silent streams
@@ -161,7 +187,9 @@ class VoiceListener(commands.Cog):
                 for seg in segments:
                     text = seg.get("text", "").strip()
                     if text:
-                        all_segments.append((seg["start"], user_id, display_name, text))
+                        # Anchor Whisper's speech-relative timestamp to session wall time
+                        wall_ts = seg["start"] + wall_offset
+                        all_segments.append((wall_ts, user_id, display_name, text))
             except Exception:
                 log.exception("Whisper failed for user %s in session %d", user_id, session_id)
 
