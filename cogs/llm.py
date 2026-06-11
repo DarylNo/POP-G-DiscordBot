@@ -45,7 +45,18 @@ _SUMMARY_SYSTEM = (
     "Write short, fun summaries of their voice chat sessions."
 )
 
-_SUMMARY_MAX_CHARS = 24000  # ~6k tokens — leaves room for prompt + response in 8k ctx
+_SUMMARY_CHUNK_SYSTEM = (
+    'You are extracting key points from part of a voice chat session from "Past our Prime Gamers" (POPG). '
+    "List the main topics, games mentioned, notable moments or quotes. Reply with bullet points only."
+)
+
+_SUMMARY_COMBINE_SYSTEM = (
+    'You are writing a final session recap for "Past our Prime Gamers" (POPG), '
+    "a Discord server of older casual gamers."
+)
+
+# Per-chunk character limit for map phase (~1500 tokens, fits 8k ctx with system prompt)
+_SUMMARY_CHUNK_CHARS = 6000
 
 _SUMMARY_PROMPT = """\
 Write a short, fun summary of this voice chat session: what was discussed, any games mentioned, \
@@ -53,6 +64,14 @@ notable moments or jokes. Keep it under 200 words and match the casual tone of t
 
 TRANSCRIPT:
 {transcript}"""
+
+_SUMMARY_COMBINE_PROMPT = """\
+These are bullet-point summaries of each part of a long voice chat session. \
+Write a short, fun final recap: what was discussed, any games mentioned, notable moments or jokes. \
+Keep it under 200 words and match the casual tone of the server.
+
+SECTION SUMMARIES:
+{summaries}"""
 
 _WHEN_SYSTEM = (
     'You are analyzing Discord activity patterns for a member of "Past our Prime Gamers" (POPG), '
@@ -111,15 +130,58 @@ def _build_transcript_text(segments: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _truncate_transcript(text: str, max_chars: int = _SUMMARY_MAX_CHARS) -> tuple[str, bool]:
-    """Truncate transcript to fit within model context. Returns (text, was_truncated)."""
-    if len(text) <= max_chars:
-        return text, False
-    # Keep the first 2/3 and last 1/3 so we capture both opening and closing
-    head = max_chars * 2 // 3
-    tail = max_chars - head
-    truncated = text[:head] + f"\n\n[... transcript truncated — {len(text) - max_chars} chars omitted ...]\n\n" + text[-tail:]
-    return truncated, True
+def _split_transcript_chunks(text: str, chunk_size: int = _SUMMARY_CHUNK_CHARS) -> list[str]:
+    """Split transcript text into chunks at line boundaries."""
+    chunks: list[str] = []
+    remaining = text.strip()
+    while len(remaining) > chunk_size:
+        split = remaining.rfind("\n", 0, chunk_size)
+        if split == -1:
+            split = chunk_size
+        chunks.append(remaining[:split].strip())
+        remaining = remaining[split:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _summarize_transcript(segments: list[dict]) -> str:
+    """Summarize a transcript using map-reduce for large sessions.
+
+    Small sessions (fit in one context window) are summarized directly.
+    Large sessions are split into chunks, each chunk bullet-pointed, then
+    a final pass combines the bullets into a cohesive recap.
+    """
+    full_text = _build_transcript_text(segments)
+
+    if len(full_text) <= _SUMMARY_CHUNK_CHARS:
+        return await _ollama_generate(
+            _SUMMARY_PROMPT.format(transcript=full_text),
+            system=_SUMMARY_SYSTEM,
+        )
+
+    chunks = _split_transcript_chunks(full_text)
+    log.info("Transcript map-reduce: %d segments → %d chunks", len(segments), len(chunks))
+
+    bullet_parts: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        try:
+            bullets = await _ollama_generate(
+                f"Part {i} of {len(chunks)}:\n\n{chunk}",
+                system=_SUMMARY_CHUNK_SYSTEM,
+            )
+            if bullets:
+                bullet_parts.append(f"Part {i}:\n{bullets}")
+        except Exception:
+            log.warning("Map-reduce chunk %d/%d failed — skipping", i, len(chunks))
+
+    if not bullet_parts:
+        return ""
+
+    return await _ollama_generate(
+        _SUMMARY_COMBINE_PROMPT.format(summaries="\n\n".join(bullet_parts)),
+        system=_SUMMARY_COMBINE_SYSTEM,
+    )
 
 
 def _chunk_text(text: str, limit: int) -> list[str]:
@@ -525,15 +587,8 @@ class LLM(commands.Cog):
         if not segments:
             return
 
-        raw_text = _build_transcript_text(segments)
-        transcript_text, truncated = _truncate_transcript(raw_text)
-        if truncated:
-            log.info("Session %d: transcript truncated for summary (%d → %d chars)",
-                     session_id, len(raw_text), len(transcript_text))
-        prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
-
         try:
-            summary = await _ollama_generate(prompt, system=_SUMMARY_SYSTEM)
+            summary = await _summarize_transcript(segments)
         except Exception:
             log.exception("Ollama request failed for session %d", session_id)
             database.set_transcript_status(session_id, "failed")
@@ -595,19 +650,18 @@ class LLM(commands.Cog):
                 await ctx.send(f"Session #{sid} has no transcript data to summarise.")
                 return
             msg = "Regenerating" if redo else "Retrying"
-            raw_text = _build_transcript_text(segments)
-            transcript_text, truncated = _truncate_transcript(raw_text)
-            trunc_note = f", truncated from {len(segments)} segments to fit context" if truncated else f", {len(segments)} segments"
-            await ctx.send(f"{msg} summary for session #{sid}…{trunc_note}, may take a moment")
-            prompt = _SUMMARY_PROMPT.format(transcript=transcript_text)
+            full_text = _build_transcript_text(segments)
+            chunks = _split_transcript_chunks(full_text)
+            chunk_note = f"{len(chunks)} chunks" if len(chunks) > 1 else f"{len(segments)} segments"
+            await ctx.send(f"{msg} summary for session #{sid} — {chunk_note}, may take a moment")
             try:
-                summary = await _ollama_generate(prompt, system=_SUMMARY_SYSTEM)
+                summary = await _summarize_transcript(segments)
             except Exception:
                 log.exception("Ollama recap failed for session %d", sid)
                 await ctx.send(f"Summary generation failed. Use `!transcript {sid}` to read the raw transcript.")
                 return
             if not summary:
-                await ctx.send(f"Ollama returned an empty response. The transcript may still be too large — try `!transcript {sid}` to read it directly.")
+                await ctx.send(f"Ollama returned an empty response. Try `!transcript {sid}` to read it directly.")
                 return
             database.set_transcript_summary(sid, summary)
         else:
