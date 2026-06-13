@@ -21,7 +21,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 # Context window in tokens. Ollama defaults to 2048, which truncates long
 # transcripts — bump it so full voice sessions fit in the prompt.
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+# None = not set, Ollama uses the model's native context window
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX")) if os.getenv("OLLAMA_NUM_CTX") else None
 
 _DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",      "20"))   # user+assistant pairs kept
 _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)))  # 2h idle expiry
@@ -269,7 +270,7 @@ async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list
                 "model": OLLAMA_MODEL,
                 "messages": messages,
                 "stream": False,
-                "options": {"num_ctx": OLLAMA_NUM_CTX},
+                "options": ({"num_ctx": OLLAMA_NUM_CTX} if OLLAMA_NUM_CTX else {}),
             },
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
