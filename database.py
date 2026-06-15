@@ -68,7 +68,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS chat_messages (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             message_id INTEGER NOT NULL UNIQUE,
-            channel_id INTEGER NOT NULL REFERENCES watched_channels(channel_id),
+            channel_id INTEGER NOT NULL,
             user_id    INTEGER NOT NULL,
             username   TEXT    NOT NULL,
             content    TEXT    NOT NULL,
@@ -153,6 +153,31 @@ def init_db() -> None:
             pass  # column already exists — expected on existing databases
         except Exception as e:
             log.warning("Migration failed: %s — %s", migration, e)
+
+    # Remove the FK constraint on chat_messages.channel_id — watch-all mode logs
+    # channels that aren't explicitly in watched_channels, causing FK failures.
+    try:
+        conn.executescript("""
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS chat_messages_v2 (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL UNIQUE,
+                channel_id INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                username   TEXT    NOT NULL,
+                content    TEXT    NOT NULL,
+                sent_at    TEXT    NOT NULL
+            );
+            INSERT OR IGNORE INTO chat_messages_v2
+                SELECT id, message_id, channel_id, user_id, username, content, sent_at
+                FROM chat_messages;
+            DROP TABLE chat_messages;
+            ALTER TABLE chat_messages_v2 RENAME TO chat_messages;
+            COMMIT;
+        """)
+    except sqlite3.OperationalError:
+        pass  # already migrated (chat_messages_v2 won't exist on re-run)
+
     conn.commit()
 
 
