@@ -407,9 +407,11 @@ _MEMORY_CONSOLIDATE_SYSTEM = (
     "Reply with a bullet list only."
 )
 
-_MEMORY_EXTRACT_TIMEOUT = 60  # seconds — transcripts can be long; give Ollama room
+_MEMORY_EXTRACT_TIMEOUT = 300  # seconds — long transcripts need more time
 _MEMORY_MAX  = 150  # consolidate when list exceeds this
 _MEMORY_TARGET = 60  # target size after consolidation
+# Char limit per chunk when extracting memories from long transcripts
+_MEMORY_CHUNK_CHARS = 8000
 
 _TRANSCRIPT_MEMORY_SYSTEM = (
     "Extract memorable facts from this voice chat transcript for long-term memory. "
@@ -510,37 +512,42 @@ async def _extract_transcript_memories(
 ) -> None:
     """Extract memorable facts from a voice transcript and add them to guild memory.
 
+    Long transcripts are processed in chunks to avoid context/timeout limits.
     mark_extracted=False is used for mid-session chunk events so the session
     isn't prematurely marked done before the full transcript is processed.
     """
     if not segments:
         return
     transcript_text = _build_transcript_text(segments)
-    try:
-        result = await asyncio.wait_for(
-            _ollama_generate(messages=[
-                {"role": "system", "content": _TRANSCRIPT_MEMORY_SYSTEM},
-                {"role": "user",   "content": transcript_text},
-            ]),
-            timeout=_MEMORY_EXTRACT_TIMEOUT,
-        )
-    except Exception:
-        log.warning("Transcript memory extraction failed for session %d", session_id)
-        return
-    if not result or result.strip().upper() == "NONE":
-        if mark_extracted:
-            database.mark_transcript_memory_extracted(session_id)
-        return
-    lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
-    new_memories = [l for l in lines if l and l.upper() != "NONE"]
-    if new_memories:
+    chunks = _split_transcript_chunks(transcript_text, _MEMORY_CHUNK_CHARS)
+
+    all_new_memories: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        try:
+            result = await asyncio.wait_for(
+                _ollama_generate(messages=[
+                    {"role": "system", "content": _TRANSCRIPT_MEMORY_SYSTEM},
+                    {"role": "user",   "content": chunk},
+                ]),
+                timeout=_MEMORY_EXTRACT_TIMEOUT,
+            )
+        except Exception:
+            log.warning("Transcript memory extraction failed for session %d chunk %d/%d",
+                        session_id, i, len(chunks))
+            continue
+        if not result or result.strip().upper() == "NONE":
+            continue
+        lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
+        all_new_memories.extend(l for l in lines if l and l.upper() != "NONE")
+
+    if all_new_memories:
         existing = database.get_memories("guild", config.GUILD_ID)
-        combined = existing + new_memories
+        combined = existing + all_new_memories
         if len(combined) > _MEMORY_MAX:
             combined = await _consolidate_memories(combined)
         database.save_memories("guild", config.GUILD_ID, combined)
-        log.info("Session %d: extracted %d transcript memories (chunk=%s)",
-                 session_id, len(new_memories), not mark_extracted)
+        log.info("Session %d: extracted %d transcript memories across %d chunk(s) (mark=%s)",
+                 session_id, len(all_new_memories), len(chunks), mark_extracted)
     if mark_extracted:
         database.mark_transcript_memory_extracted(session_id)
 
