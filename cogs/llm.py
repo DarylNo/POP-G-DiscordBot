@@ -161,6 +161,7 @@ async def _summarize_transcript(segments: list[dict]) -> str:
         return await _ollama_generate(
             _SUMMARY_PROMPT.format(transcript=full_text),
             system=_SUMMARY_SYSTEM,
+            num_ctx=None,
         )
 
     chunks = _split_transcript_chunks(full_text)
@@ -172,6 +173,7 @@ async def _summarize_transcript(segments: list[dict]) -> str:
             bullets = await _ollama_generate(
                 f"Part {i} of {len(chunks)}:\n\n{chunk}",
                 system=_SUMMARY_CHUNK_SYSTEM,
+                num_ctx=None,
             )
             if bullets:
                 bullet_parts.append(f"Part {i}:\n{bullets}")
@@ -184,6 +186,7 @@ async def _summarize_transcript(segments: list[dict]) -> str:
     return await _ollama_generate(
         _SUMMARY_COMBINE_PROMPT.format(summaries="\n\n".join(bullet_parts)),
         system=_SUMMARY_COMBINE_SYSTEM,
+        num_ctx=None,
     )
 
 
@@ -259,26 +262,39 @@ def _get_ch_session(channel_id: int) -> dict:
     return session
 
 
-async def _ollama_generate(prompt: str = "", system: str = "", *, messages: list[dict] | None = None) -> str:
+async def _ollama_generate(
+    prompt: str = "",
+    system: str = "",
+    *,
+    messages: list[dict] | None = None,
+    num_ctx: int | None = ...,  # type: ignore[assignment]
+) -> str:
+    """Call Ollama. num_ctx overrides OLLAMA_NUM_CTX for this call.
+    Pass num_ctx=None to let Ollama use the model's full native context window.
+    Omit num_ctx (default sentinel) to use the configured OLLAMA_NUM_CTX.
+    """
+    if num_ctx is ...:  # sentinel — use the module default
+        num_ctx = OLLAMA_NUM_CTX
+
     if messages is None:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+
+    options: dict = {
+        "temperature": OLLAMA_TEMPERATURE,
+        "top_p":       OLLAMA_TOP_P,
+        "top_k":       OLLAMA_TOP_K,
+    }
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
+
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
             f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": messages,
-                "stream": False,
-                "options": {
-                    "temperature": OLLAMA_TEMPERATURE,
-                    "top_p":       OLLAMA_TOP_P,
-                    "top_k":       OLLAMA_TOP_K,
-                    **({"num_ctx": OLLAMA_NUM_CTX} if OLLAMA_NUM_CTX else {}),
-                },
-            },
+            json={"model": OLLAMA_MODEL, "messages": messages,
+                  "stream": False, "options": options},
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
         resp.raise_for_status()
@@ -528,7 +544,7 @@ async def _extract_transcript_memories(
                 _ollama_generate(messages=[
                     {"role": "system", "content": _TRANSCRIPT_MEMORY_SYSTEM},
                     {"role": "user",   "content": chunk},
-                ]),
+                ], num_ctx=None),
                 timeout=_MEMORY_EXTRACT_TIMEOUT,
             )
         except Exception:
@@ -863,7 +879,7 @@ class LLM(commands.Cog):
         )
 
         try:
-            prediction = await _ollama_generate(prompt, system=_WHEN_SYSTEM)
+            prediction = await _ollama_generate(prompt, system=_WHEN_SYSTEM, num_ctx=None)
         except Exception:
             log.exception("!when: Ollama failed for user %d", target.id)
             await status_msg.edit(content="Prediction failed — Ollama is not responding. Try again in a moment.")
