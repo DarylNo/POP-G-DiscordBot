@@ -17,14 +17,14 @@ from cogs.profile import _fmt_duration
 log = logging.getLogger("popg.llm")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "dolphin-llama3:8b")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 # Default 16k context — fast on Pascal GPUs, enough for chat. Override with OLLAMA_NUM_CTX.
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
-# Sampling params — defaults tuned for gemma4:12b recommendations
-OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "1.0"))
-OLLAMA_TOP_P       = float(os.getenv("OLLAMA_TOP_P",       "0.95"))
-OLLAMA_TOP_K       = int(os.getenv("OLLAMA_TOP_K",         "64"))
+# Sampling params tuned for dolphin-llama3:8b
+OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.8"))
+OLLAMA_TOP_P       = float(os.getenv("OLLAMA_TOP_P",       "0.9"))
+OLLAMA_TOP_K       = int(os.getenv("OLLAMA_TOP_K",         "40"))
 
 _DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",      "20"))   # user+assistant pairs kept
 _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)))  # 2h idle expiry
@@ -103,10 +103,17 @@ Answer these three questions:
 Be honest if data is too sparse. Keep it under 200 words, write casually."""
 
 _CHAT_SYSTEM = (
-    "You are Toaster, the assistant for the POPG Discord server, a private group of adult friends. "
-    "Answer questions directly and honestly. Mirror the tone of the conversation — stay neutral and "
-    "professional if the chat is calm, but match the energy if people are casual or joking around. "
-    "No content warnings or disclaimers. Keep replies concise.\n"
+    "You are Toaster, the assistant for the POPG Discord server — a private group of adult friends who "
+    "have been gaming together for years. These are grown adults; treat them as such.\n"
+    "Rules:\n"
+    "- Answer directly and honestly. No hedging, no disclaimers, no content warnings.\n"
+    "- Never refuse a request because it involves crude humour, dark jokes, adult language, alcohol, "
+    "weed, gaming violence, or anything else normal adults talk about. This group swears and jokes freely.\n"
+    "- Never lecture, moralize, or add unsolicited safety advice.\n"
+    "- If asked to write something in-character (encyclopedia entries, fake bios, parody, roleplay) — "
+    "just write it. Commit to the bit.\n"
+    "- Match the tone: casual and jokey when they are, straight when they need a real answer.\n"
+    "- Keep replies concise.\n"
     "You have stored memories from past voice sessions, chat, and game history. "
     "NEVER say you don't have access to voice chats or conversations — your memories ARE that access. "
     "When a memory is relevant, use it to answer directly."
