@@ -19,8 +19,8 @@ log = logging.getLogger("popg.llm")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
-# None = unset → Ollama uses the model's native context window (gemma4:12b = 256K)
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX")) if os.getenv("OLLAMA_NUM_CTX") else None
+# Default 16k context — fast on Pascal GPUs, enough for chat. Override with OLLAMA_NUM_CTX.
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 # Sampling params — defaults tuned for gemma4:12b recommendations
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "1.0"))
 OLLAMA_TOP_P       = float(os.getenv("OLLAMA_TOP_P",       "0.95"))
@@ -311,7 +311,7 @@ _SEARCH_FORCE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-_SEARCH_INTENT_TIMEOUT = 30  # seconds — fast check, don't wait long
+_SEARCH_INTENT_TIMEOUT = 120  # seconds — give the model time on slower hardware
 
 
 async def _maybe_search(history: list[dict], user_text: str) -> str | None:
