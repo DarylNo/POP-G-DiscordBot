@@ -358,21 +358,34 @@ async def _maybe_search(history: list[dict], user_text: str) -> str | None:
     return None
 
 
-async def _web_search(query: str, max_results: int = 4) -> str:
+async def _web_search(query: str, max_results: int = 5) -> str:
     """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
     from duckduckgo_search import DDGS
+    try:
+        from duckduckgo_search.exceptions import DuckDuckGoSearchException
+    except ImportError:
+        DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
 
     def _sync_search() -> list:
-        return list(DDGS(timeout=8).text(query, max_results=max_results))
+        return list(DDGS(timeout=15).text(query, max_results=max_results))
 
-    try:
-        results = await asyncio.get_running_loop().run_in_executor(None, _sync_search)
-    except BaseException:
-        log.warning("DDG search failed for query: %s", query, exc_info=True)
-        return ""
-    if not results:
-        return ""
-    return "\n".join(f"• {r['title']}: {r['body']}" for r in results)
+    loop = asyncio.get_running_loop()
+    for attempt in range(3):
+        try:
+            results = await loop.run_in_executor(None, _sync_search)
+            if results:
+                formatted = "\n".join(f"• {r['title']}: {r['body']}" for r in results)
+                log.debug("DDG search returned %d results for: %s", len(results), query[:80])
+                return formatted
+            log.debug("DDG search returned 0 results (attempt %d) for: %s", attempt + 1, query[:80])
+        except DuckDuckGoSearchException as exc:
+            log.warning("DDG rate-limited (attempt %d): %s", attempt + 1, exc)
+        except BaseException:
+            log.warning("DDG search failed (attempt %d) for: %s", attempt + 1, query[:80], exc_info=True)
+            break  # non-rate-limit errors won't improve with a retry
+        if attempt < 2:
+            await asyncio.sleep(2 ** attempt)  # 1s, 2s backoff
+    return ""
 
 
 _URL_RE = re.compile(r"https?://[^\s>\"']+", re.IGNORECASE)
