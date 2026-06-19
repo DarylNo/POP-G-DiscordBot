@@ -17,11 +17,11 @@ from cogs.profile import _fmt_duration
 log = logging.getLogger("popg.llm")
 
 # Chat instance — WizardLM2 on card 0 (port 11435)
-OLLAMA_URL   = "http://localhost:11435"
+OLLAMA_URL   = "http://192.168.1.126:11435"
 OLLAMA_MODEL = "wizardlm2:7b"
 
 # Analysis instance — gemma2:9b on card 1 (port 11434)
-OLLAMA_ANALYSIS_URL   = "http://localhost:11434"
+OLLAMA_ANALYSIS_URL   = "http://192.168.1.126:11434"
 OLLAMA_ANALYSIS_MODEL = "gemma2:9b"
 
 OLLAMA_TIMEOUT = 600
