@@ -16,15 +16,21 @@ from cogs.profile import _fmt_duration
 
 log = logging.getLogger("popg.llm")
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "dolphin-llama3:8b")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
-# Default 16k context — fast on Pascal GPUs, enough for chat. Override with OLLAMA_NUM_CTX.
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
-# Sampling params tuned for dolphin-llama3:8b
-OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.8"))
-OLLAMA_TOP_P       = float(os.getenv("OLLAMA_TOP_P",       "0.9"))
-OLLAMA_TOP_K       = int(os.getenv("OLLAMA_TOP_K",         "40"))
+# Chat instance — WizardLM2 on card 0 (port 11435)
+OLLAMA_URL   = "http://localhost:11435"
+OLLAMA_MODEL = "wizardlm2:7b"
+
+# Analysis instance — gemma2:9b on card 1 (port 11434)
+OLLAMA_ANALYSIS_URL   = "http://localhost:11434"
+OLLAMA_ANALYSIS_MODEL = "gemma2:9b"
+
+OLLAMA_TIMEOUT = 600
+OLLAMA_NUM_CTX = 16384  # chat default; analysis tasks pass num_ctx=None for full context
+
+# Sampling params tuned for WizardLM2
+OLLAMA_TEMPERATURE = 0.85
+OLLAMA_TOP_P       = 0.9
+OLLAMA_TOP_K       = 40
 
 _DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",      "20"))   # user+assistant pairs kept
 _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)))  # 2h idle expiry
@@ -165,10 +171,9 @@ async def _summarize_transcript(segments: list[dict]) -> str:
     full_text = _build_transcript_text(segments)
 
     if len(full_text) <= _SUMMARY_CHUNK_CHARS:
-        return await _ollama_generate(
+        return await _ollama_analyse(
             _SUMMARY_PROMPT.format(transcript=full_text),
             system=_SUMMARY_SYSTEM,
-            num_ctx=None,
         )
 
     chunks = _split_transcript_chunks(full_text)
@@ -177,10 +182,9 @@ async def _summarize_transcript(segments: list[dict]) -> str:
     bullet_parts: list[str] = []
     for i, chunk in enumerate(chunks, 1):
         try:
-            bullets = await _ollama_generate(
+            bullets = await _ollama_analyse(
                 f"Part {i} of {len(chunks)}:\n\n{chunk}",
                 system=_SUMMARY_CHUNK_SYSTEM,
-                num_ctx=None,
             )
             if bullets:
                 bullet_parts.append(f"Part {i}:\n{bullets}")
@@ -190,10 +194,9 @@ async def _summarize_transcript(segments: list[dict]) -> str:
     if not bullet_parts:
         return ""
 
-    return await _ollama_generate(
+    return await _ollama_analyse(
         _SUMMARY_COMBINE_PROMPT.format(summaries="\n\n".join(bullet_parts)),
         system=_SUMMARY_COMBINE_SYSTEM,
-        num_ctx=None,
     )
 
 
@@ -275,10 +278,13 @@ async def _ollama_generate(
     *,
     messages: list[dict] | None = None,
     num_ctx: int | None = ...,  # type: ignore[assignment]
+    url: str = OLLAMA_URL,
+    model: str = OLLAMA_MODEL,
 ) -> str:
     """Call Ollama. num_ctx overrides OLLAMA_NUM_CTX for this call.
     Pass num_ctx=None to let Ollama use the model's full native context window.
     Omit num_ctx (default sentinel) to use the configured OLLAMA_NUM_CTX.
+    Pass url/model to route to a different Ollama instance.
     """
     if num_ctx is ...:  # sentinel — use the module default
         num_ctx = OLLAMA_NUM_CTX
@@ -299,14 +305,33 @@ async def _ollama_generate(
 
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": messages,
+            f"{url}/api/chat",
+            json={"model": model, "messages": messages,
                   "stream": False, "options": options},
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
         resp.raise_for_status()
         data = await resp.json()
     return data.get("message", {}).get("content", "").strip()
+
+
+async def _ollama_analyse(
+    prompt: str = "",
+    system: str = "",
+    *,
+    messages: list[dict] | None = None,
+    num_ctx: int | None = None,
+) -> str:
+    """Route to the analysis Ollama instance (gemma2:9b, port 11434).
+    Defaults to num_ctx=None (unlimited) since analysis tasks need full context.
+    """
+    return await _ollama_generate(
+        prompt, system,
+        messages=messages,
+        num_ctx=num_ctx,
+        url=OLLAMA_ANALYSIS_URL,
+        model=OLLAMA_ANALYSIS_MODEL,
+    )
 
 
 _SEARCH_INTENT_SYSTEM = (
@@ -462,7 +487,7 @@ async def _extract_memories(exchange: list[dict]) -> list[str]:
     """Extract memorable facts from a user+assistant exchange. Returns [] if nothing notable."""
     try:
         result = await asyncio.wait_for(
-            _ollama_generate(messages=[
+            _ollama_analyse(messages=[
                 {"role": "system", "content": _MEMORY_EXTRACT_SYSTEM},
                 *exchange,
             ]),
@@ -482,7 +507,7 @@ async def _consolidate_memories(memories: list[str]) -> list[str]:
     bullet_list = "\n".join(f"• {m}" for m in memories)
     try:
         result = await asyncio.wait_for(
-            _ollama_generate(messages=[
+            _ollama_analyse(messages=[
                 {"role": "system", "content": _MEMORY_CONSOLIDATE_SYSTEM},
                 {"role": "user", "content": bullet_list},
             ]),
@@ -561,10 +586,10 @@ async def _extract_transcript_memories(
     for i, chunk in enumerate(chunks, 1):
         try:
             result = await asyncio.wait_for(
-                _ollama_generate(messages=[
+                _ollama_analyse(messages=[
                     {"role": "system", "content": _TRANSCRIPT_MEMORY_SYSTEM},
                     {"role": "user",   "content": chunk},
-                ], num_ctx=None),
+                ]),
                 timeout=_MEMORY_EXTRACT_TIMEOUT,
             )
         except Exception:
@@ -899,7 +924,7 @@ class LLM(commands.Cog):
         )
 
         try:
-            prediction = await _ollama_generate(prompt, system=_WHEN_SYSTEM, num_ctx=None)
+            prediction = await _ollama_analyse(prompt, system=_WHEN_SYSTEM)
         except Exception:
             log.exception("!when: Ollama failed for user %d", target.id)
             await status_msg.edit(content="Prediction failed — Ollama is not responding. Try again in a moment.")
