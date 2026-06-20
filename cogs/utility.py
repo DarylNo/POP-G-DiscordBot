@@ -46,9 +46,15 @@ Message me directly (no `!` prefix) for a continuous chat — I'll remember the 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 **AI Routing**
-Chat & DMs → WizardLM2 7B
-Summaries, memory & analysis → gemma2 9B
-Voice transcription → Whisper""".strip()
+
+**WizardLM2 7B**
+`!chat`, DMs, search intent
+
+**gemma2 9B**
+`!recap`, `!when`, `!memorybuild`, memory extraction, transcript summarization
+
+**Whisper**
+Voice transcription (`!join` / `!leave`)""".strip()
 
 ADMIN_VOICE_COMMANDS = """
 **Voice Recording (Admin)**
