@@ -27,21 +27,34 @@ _WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online
 
 _USER_COMMANDS_BOTTOM = """
 **Ask the AI**
-`!chat <message>` — Ask the local LLM anything (alias `!ask`)
+`!chat <message>` — Chat with Toaster (alias `!ask`) — WizardLM2 7B
+`!memorybuild` — Rebuild Toaster's memory from all stored transcripts
+`!reset` — Clear your chat history with Toaster
 
 **DM Conversations**
 Message me directly (no `!` prefix) for a continuous chat — I'll remember the conversation.
-`!reset` — Clear your DM conversation history and start fresh
 
 **Voice Recap**
-`!recap [id]` — LLM summary of last (or specific) voice session
-`!recap redo [id]` — Force-regenerate the LLM summary
+`!recap [id]` — AI summary of last (or specific) voice session — gemma2 9B
+`!recap redo [id]` — Force-regenerate the summary
 `!transcript [id]` — Full attributed transcript with timestamps
 `!sessions` — List recent voice recording sessions
 
 **Other**
-`!ping` — Check bot latency
-`!help` — Show this message""".strip()
+`!ping` — Check bot latency and version
+`!help` — Show this message
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+**AI Routing**
+
+**WizardLM2 7B**
+`!chat`, DMs, search intent
+
+**gemma2 9B**
+`!recap`, `!when`, `!memorybuild`, memory extraction, transcript summarization
+
+**Whisper**
+Voice transcription (`!join` / `!leave`)""".strip()
 
 ADMIN_VOICE_COMMANDS = """
 **Voice Recording (Admin)**

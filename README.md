@@ -1,10 +1,15 @@
-# POPG Discord Bot
+# POPG Discord Bot — Toaster
 
-A Discord bot for **Past our Prime Gamers** — silently tracks member activity across the server and lets you query stats and leaderboards via simple `!` commands.
+The Discord bot for **Past our Prime Gamers**. Silently tracks member activity, runs an AI chat assistant powered by local LLMs, and transcribes voice sessions.
+
+Current version: **1.8.1**
 
 ---
 
-## What it tracks
+## What it does
+
+### Activity tracking
+Presence, gaming, and voice activity are recorded automatically with no configuration needed.
 
 | Activity | How |
 |---|---|
@@ -12,23 +17,53 @@ A Discord bot for **Past our Prime Gamers** — silently tracks member activity 
 | Gaming (game name + duration) | Activity events |
 | Voice channel presence | Voice state events |
 
-All data is stored locally in a SQLite database (`popg.db`). Nothing is posted to channels unless you run a command.
+All data is stored locally in a SQLite database (`popg.db`). Nothing is posted to channels automatically.
+
+### AI assistant (Toaster)
+`!chat` and DMs go to **WizardLM2 7B** running on a dedicated GPU machine. Toaster has persistent memory built from voice session transcripts, chat history, and game stats — it remembers what happened in past sessions and can reference them in conversation.
+
+### Voice transcription
+`!join` starts recording a voice channel. Whisper transcribes audio in rolling 5-minute chunks. When the session ends with `!leave`, an AI-generated recap is posted and memories are extracted from the transcript and saved for future conversations.
 
 ---
 
 ## Commands
 
-| Command | Who can use | Description |
+### Stats
+| Command | Who | Description |
 |---|---|---|
-| `!profile` | Everyone | Your own activity stats |
-| `!profile @member` | Everyone | Another member's stats |
+| `!profile [@member]` | Everyone | Activity stats (online, gaming, voice time) |
 | `!stats [@member]` | Everyone | Alias for `!profile` |
-| `!leaderboard` | Everyone | Top 10 by online time |
-| `!leaderboard gaming` | Everyone | Top 10 by gaming hours |
-| `!leaderboard voice` | Everyone | Top 10 by voice hours |
+| `!leaderboard [online\|gaming\|voice]` | Everyone | Top 10 by category (default: online) |
+| `!weekly [online\|gaming\|voice]` | Everyone | Last 7 days leaderboard |
+| `!monthly [online\|gaming\|voice]` | Everyone | Last 30 days leaderboard |
+
+### AI
+| Command | Who | Description |
+|---|---|---|
+| `!chat <message>` | Everyone | Chat with Toaster (also `!ask`) |
+| `!when [@member]` | Everyone | Predict when a member will next be online |
+| `!recap <session_id>` | Everyone | AI-generated summary of a past voice session |
+| `!transcript <session_id>` | Everyone | Raw transcript of a voice session |
+| `!sessions` | Everyone | List recent recorded voice sessions |
+| `!memorybuild` | Everyone | Rebuild Toaster's memory from all stored transcripts |
+| `!reset` | Everyone | Clear your personal chat history with Toaster |
+
+Toaster also responds to DMs directly.
+
+### Voice recording
+| Command | Who | Description |
+|---|---|---|
+| `!join` | Everyone | Start recording the voice channel you're in |
+| `!leave` | Everyone | Stop recording, post recap, save memories |
+
+### Admin
+| Command | Who | Description |
+|---|---|---|
 | `!admin sessions` | Admin | Live list of all active tracking sessions |
 | `!admin reset @member` | Admin | Zero out a member's stats |
 | `!admin info @member` | Admin | Raw stat dump for debugging |
+| `!admin reload` | Admin | Reload all cogs without restarting |
 
 Admin commands require the `Administrator` permission or a role named `Admin`.
 
@@ -40,28 +75,27 @@ Admin commands require the `Administrator` permission or a role named `Admin`.
 
 1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
 2. **New Application** → name it → **Create**
-3. Click **Bot** in the sidebar → **Reset Token** → copy and save the token
-4. Scroll down and enable both:
+3. Click **Bot** → **Reset Token** → copy and save the token
+4. Enable all three Privileged Gateway Intents:
    - **Server Members Intent**
    - **Presence Intent**
+   - **Message Content Intent**
 5. **OAuth2 → URL Generator** → check `bot` under Scopes
-6. Under Bot Permissions check: `Read Messages/View Channels`, `Send Messages`, `Embed Links`, `Read Message History`
-7. Copy the generated URL → open it → invite the bot to your server
+6. Bot Permissions: `Read Messages/View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Connect`, `Speak`
+7. Copy the generated URL → invite the bot to your server
 
 ### 2. Get your Server ID
 
-In Discord: **Settings → Advanced → enable Developer Mode**.  
-Right-click your server icon → **Copy Server ID**.
+**Settings → Advanced → Developer Mode**, then right-click your server icon → **Copy Server ID**.
 
-### 3. Install the bot
+### 3. Install
 
 ```bash
 git clone https://github.com/DarylNo/POP-G-DiscordBot.git
 cd POP-G-DiscordBot
-git checkout claude/discord-popg-chatbot-REQLv
 
 python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 
 pip install -r requirements.txt
 
@@ -70,102 +104,81 @@ cp .env.example .env
 
 ### 4. Configure `.env`
 
-Open `.env` and fill in your values:
-
 ```
 BOT_TOKEN=your_bot_token_here
 PREFIX=!
 GUILD_ID=your_server_id_here
 ```
 
-### 5. Run
+### 5. Ollama (required for AI features)
+
+The bot expects two Ollama instances running on the network. Edit the URLs at the top of `cogs/llm.py` to match your setup:
+
+```python
+# Chat instance
+OLLAMA_URL   = "http://<your-ip>:11435"
+OLLAMA_MODEL = "wizardlm2:7b"
+
+# Analysis instance (summarization, memory extraction)
+OLLAMA_ANALYSIS_URL   = "http://<your-ip>:11434"
+OLLAMA_ANALYSIS_MODEL = "gemma2:9b"
+```
+
+Pull the models on your Ollama machine:
+```bash
+ollama pull wizardlm2:7b
+ollama pull gemma2:9b
+```
+
+To run two Ollama instances on separate GPUs:
+```bash
+CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=0.0.0.0:11435 ollama serve
+CUDA_VISIBLE_DEVICES=1 OLLAMA_HOST=0.0.0.0:11434 ollama serve
+```
+
+### 6. Whisper (required for voice transcription)
+
+```bash
+pip install openai-whisper
+```
+
+Set `WHISPER_DEVICE=cuda` in `.env` to use GPU (recommended). Default model is `small` — change with `WHISPER_MODEL=medium` if you have VRAM headroom.
+
+### 7. Run
 
 ```bash
 python3 bot.py
-```
-
-You should see:
-```
-INFO popg: POPG Bot ready — logged in as POPG Bot#1234
-```
-
-### Keep it running after closing the terminal
-
-```bash
-# Option A — background process
-nohup python3 bot.py &
-
-# Option B — screen session
-screen -S popgbot
-python3 bot.py
-# Ctrl+A then D to detach; screen -r popgbot to reattach
 ```
 
 ---
 
-## Running with Docker (recommended for 24/7 hosting)
-
-Docker handles auto-restart on crash or reboot with no extra setup.
-
-### Prerequisites
-- [Install Docker](https://docs.docker.com/get-docker/)
-
-### Quick start
+## Running with Docker
 
 ```bash
-# 1. Clone the repo and configure .env as above (Steps 1–4)
-
-# 2. Build and start in the background
+# Build and start
 docker compose up -d --build
-```
 
-The bot is now running. The database and logs are saved to a `data/` folder in the project directory so they survive container restarts and rebuilds.
-
-### Useful commands
-
-```bash
-# View live logs
+# View logs
 docker logs -f popg-bot
 
-# Stop the bot
-docker compose stop
-
-# Start again
-docker compose start
-
-# Apply code updates from git
-git pull
-docker compose up -d --build
+# Apply updates
+git pull && docker compose up -d --build
 ```
 
 ---
 
-## Requirements
+## Architecture
 
-- Python 3.10+
-- `discord.py >= 2.3.0`
-- `python-dotenv >= 1.0.0`
+| File | Purpose |
+|---|---|
+| `bot.py` | Entry point, loads cogs |
+| `config.py` | Reads `.env` |
+| `database.py` | All SQLite access (never bypassed) |
+| `cogs/tracking.py` | Presence and voice state events |
+| `cogs/profile.py` | `!profile` / `!stats` |
+| `cogs/leaderboard.py` | `!leaderboard`, `!weekly`, `!monthly` |
+| `cogs/admin.py` | Admin subcommands |
+| `cogs/llm.py` | AI chat, memory system, `!when`, `!recap` |
+| `cogs/voice_listener.py` | Voice recording, Whisper transcription |
 
----
-
-## Database
-
-The bot creates `popg.db` automatically on first run. Three tables:
-
-- **`users`** — one row per member, aggregate totals
-- **`sessions`** — one row per activity session (open until the activity ends)
-- **`game_stats`** — per-user, per-game cumulative stats
-
-The bot recovers open sessions correctly when restarted.
-
----
-
-## Roadmap
-
-Phase 2 will add a local LLM (via [Ollama](https://ollama.com/)) for:
-- `!ask <question>` — natural language Q&A about the server
-- AI-generated narrative player summaries
-- Game recommendations based on play history
-- Voice transcription and session recaps via Whisper
-
-See `.claude/roadmap.md` for the full technical plan.
+Database: SQLite with WAL mode. Three core tables (`users`, `sessions`, `game_stats`) plus LLM tables (`memories`, `chat_messages`, `voice_sessions`, `transcript_segments`).
