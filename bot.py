@@ -134,30 +134,36 @@ class POPGBot(commands.Bot):
             except ImportError:
                 checks.append(("⚠️", "GPU: `torch` not installed"))
 
-        # Ollama
-        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        ollama_model = os.getenv("OLLAMA_MODEL", "llama3")
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.get(
-                    f"{ollama_url}/api/tags",
-                    timeout=aiohttp.ClientTimeout(total=5),
-                )
-                data = await resp.json()
-            available = [m["name"] for m in data.get("models", [])]
-            match = any(ollama_model in m for m in available)
-            if match:
-                checks.append(("✅", f"Ollama: reachable — `{ollama_model}` ready"))
-            else:
-                available_str = ", ".join(f"`{m}`" for m in available) or "none pulled"
-                checks.append(("⚠️", f"Ollama: reachable but `{ollama_model}` not found — available: {available_str}"))
-        except Exception as e:
-            checks.append(("❌", f"Ollama: unreachable at `{ollama_url}` — {e}"))
+        # Ollama — check both instances using the values hardcoded in cogs/llm.py
+        from cogs.llm import (
+            OLLAMA_URL, OLLAMA_MODEL,
+            OLLAMA_ANALYSIS_URL, OLLAMA_ANALYSIS_MODEL,
+        )
+        for label, url, model in [
+            ("Ollama chat", OLLAMA_URL, OLLAMA_MODEL),
+            ("Ollama analysis", OLLAMA_ANALYSIS_URL, OLLAMA_ANALYSIS_MODEL),
+        ]:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.get(
+                        f"{url}/api/tags",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    )
+                    data = await resp.json()
+                available = [m["name"] for m in data.get("models", [])]
+                match = any(model in m for m in available)
+                if match:
+                    checks.append(("✅", f"{label}: `{model}` ready"))
+                else:
+                    available_str = ", ".join(f"`{m}`" for m in available) or "none pulled"
+                    checks.append(("⚠️", f"{label}: reachable but `{model}` not found — available: {available_str}"))
+            except Exception as e:
+                checks.append(("❌", f"{label}: unreachable at `{url}` — {e}"))
 
-        log.info("=== Startup Diagnostics ===")
+        log.info("=== Startup Diagnostics (v%s) ===", VERSION)
         for icon, msg in checks:
             log.info("  %s %s", icon, msg)
-        log.info("===========================")
+        log.info("==================================")
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         # Unwrap CheckFailure wrappers from guild_only etc.
