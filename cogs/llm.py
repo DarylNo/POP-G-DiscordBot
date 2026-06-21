@@ -47,25 +47,32 @@ _TZ_TORONTO = ZoneInfo("America/Toronto")
 
 _SUMMARY_SYSTEM = (
     'You are a recap writer for "Past our Prime Gamers" (POPG), a Discord server of older casual gamers. '
-    "Write short, fun summaries of their voice chat sessions."
+    "Write short, fun summaries of their voice chat sessions. "
+    "CRITICAL: Only describe what is literally present in the transcript. "
+    "Do NOT invent topics, games, jokes, or details that are not explicitly stated. "
+    "If the transcript is short or sparse, write a short recap — do not pad or fabricate."
 )
 
 _SUMMARY_CHUNK_SYSTEM = (
     'You are extracting key points from part of a voice chat session from "Past our Prime Gamers" (POPG). '
-    "List the main topics, games mentioned, notable moments or quotes. Reply with bullet points only."
+    "List the main topics, games mentioned, notable moments or quotes. Reply with bullet points only. "
+    "Only include points that are explicitly stated in the transcript."
 )
 
 _SUMMARY_COMBINE_SYSTEM = (
     'You are writing a final session recap for "Past our Prime Gamers" (POPG), '
-    "a Discord server of older casual gamers."
+    "a Discord server of older casual gamers. "
+    "Only use the bullet points provided — do not invent or expand beyond what is listed."
 )
 
 # Per-chunk character limit for map phase (~1500 tokens, fits 8k ctx with system prompt)
 _SUMMARY_CHUNK_CHARS = 6000
 
 _SUMMARY_PROMPT = """\
-Write a short, fun summary of this voice chat session: what was discussed, any games mentioned, \
-notable moments or jokes. Keep it under 200 words and match the casual tone of the server.
+Write a short, fun summary of this voice chat session based ONLY on what is in the transcript below.
+Only mention topics, games, and moments that are explicitly present. Do NOT invent or expand on anything not stated.
+If the session was brief or only one thing was said, just recap that one thing — keep it proportional to the actual content.
+Keep it under 200 words and match the casual tone of the server.
 
 TRANSCRIPT:
 {transcript}"""

@@ -50,6 +50,30 @@ class TimestampedSink(WaveSink):
         super().write(data, user)
 
 
+def _get_game_label(member: discord.Member) -> str:
+    """Return the game name a member is currently playing, or 'idle'."""
+    for activity in member.activities:
+        if isinstance(activity, discord.Game):
+            return activity.name
+        if isinstance(activity, discord.Activity) and activity.type == discord.ActivityType.playing:
+            return activity.name
+    return "idle"
+
+
+def _snapshot_game_context(channel: discord.VoiceChannel, bot_id: int) -> Optional[str]:
+    """Describe what each human member in the channel is playing (or idle)."""
+    parts = []
+    for member in channel.members:
+        if member.bot:
+            continue
+        label = _get_game_label(member)
+        if label == "idle":
+            parts.append(f"{member.display_name} idle/chatting")
+        else:
+            parts.append(f"{member.display_name} playing {label}")
+    return ("Games: " + ", ".join(parts)) if parts else None
+
+
 def _transcribe(model, audio_bytes: bytes) -> list[dict]:
     """Blocking: write bytes to temp WAV, run Whisper, return segments list."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -230,13 +254,18 @@ class VoiceListener(commands.Cog):
         # Compute how far into the session this chunk started
         chunk_wall_offset = entry["chunk_start"] - entry["session_start"]
 
+        # Snapshot game context before disconnecting (channel.members becomes stale after leave)
+        game_context: Optional[str] = None
+        if vc.channel:
+            game_context = _snapshot_game_context(vc.channel, self.bot.user.id)
+
         if is_final:
             self._active.pop(guild_id, None)
             await vc.disconnect()
             database.close_transcript_session(session_id)
 
         # Transcribe the captured chunk
-        new_segs = await self._process_sink(sink, guild_id, session_id, chunk_wall_offset)
+        new_segs = await self._process_sink(sink, guild_id, session_id, chunk_wall_offset, game_context)
 
         if is_final:
             total = database.count_transcript_segments(session_id)
@@ -278,6 +307,7 @@ class VoiceListener(commands.Cog):
         guild_id: int,
         session_id: int,
         chunk_wall_offset: float,
+        game_context: Optional[str] = None,
     ) -> list[dict]:
         """Transcribe all audio in a sink, store segments, return them as dicts."""
         if not sink.audio_data:
@@ -316,11 +346,18 @@ class VoiceListener(commands.Cog):
                 log.exception("Whisper failed for user %s in session %d", user_id, session_id)
 
         chunk_segments.sort(key=lambda s: s[0])
+
+        # Prepend a context marker so the LLM knows what was being played
+        if game_context:
+            database.add_transcript_segment(session_id, 0, "[Session]", chunk_wall_offset, game_context)
         for ts, uid, name, text in chunk_segments:
             database.add_transcript_segment(session_id, uid, name, ts, text)
 
-        return [{"timestamp": ts, "display_name": name, "text": text}
-                for ts, uid, name, text in chunk_segments]
+        result = [{"timestamp": ts, "display_name": name, "text": text}
+                  for ts, uid, name, text in chunk_segments]
+        if game_context:
+            result.insert(0, {"timestamp": chunk_wall_offset, "display_name": "[Session]", "text": game_context})
+        return result
 
     # ------------------------------------------------------------------ #
     #  Error handlers                                                      #
