@@ -981,12 +981,14 @@ class LLM(commands.Cog):
         full_messages.append({"role": "user", "content": call_content})
 
         async with ctx.typing():
+            _t0 = datetime.now(timezone.utc)
             try:
                 reply = await _ollama_generate(messages=full_messages)
             except Exception:
                 log.exception("!chat: Ollama failed for user %d", ctx.author.id)
                 await ctx.send("The LLM isn't responding right now. Try again in a moment.")
                 return
+            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
 
         if not reply:
             await ctx.send("I didn't get a response. Try rephrasing.")
@@ -1004,8 +1006,12 @@ class LLM(commands.Cog):
         else:
             database.save_dm_history(ctx.author.id, session["messages"])
 
-        for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
-            await ctx.send(chunk)
+        chunks = _chunk_text(reply, _CHAT_REPLY_LIMIT)
+        for i, chunk in enumerate(chunks):
+            if i == len(chunks) - 1:
+                await ctx.send(f"{chunk}\n-# ⏱ {_elapsed:.1f}s")
+            else:
+                await ctx.send(chunk)
 
         # Extract and store memories in the background — don't make the user wait
         asyncio.create_task(_update_memories(scope_type, scope_id, [
@@ -1082,12 +1088,14 @@ class LLM(commands.Cog):
         full_messages.append({"role": "user", "content": call_content})
 
         async with message.channel.typing():
+            _t0 = datetime.now(timezone.utc)
             try:
                 reply = await _ollama_generate(messages=full_messages)
             except Exception:
                 log.exception("DM chat failed for user %d", message.author.id)
                 await message.channel.send("The AI isn't responding right now — try again in a moment.")
                 return
+            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
 
         if not reply:
             await message.channel.send("No response — try rephrasing.")
@@ -1102,8 +1110,12 @@ class LLM(commands.Cog):
             session["messages"] = session["messages"][-max_items:]
         database.save_dm_history(message.author.id, session["messages"])
 
-        for chunk in _chunk_text(reply, _CHAT_REPLY_LIMIT):
-            await message.channel.send(chunk)
+        chunks = _chunk_text(reply, _CHAT_REPLY_LIMIT)
+        for i, chunk in enumerate(chunks):
+            if i == len(chunks) - 1:
+                await message.channel.send(f"{chunk}\n-# ⏱ {_elapsed:.1f}s")
+            else:
+                await message.channel.send(chunk)
 
         asyncio.create_task(_update_memories("dm", message.author.id, [
             {"role": "user",      "content": text},
