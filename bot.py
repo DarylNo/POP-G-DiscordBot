@@ -134,31 +134,24 @@ class POPGBot(commands.Bot):
             except ImportError:
                 checks.append(("⚠️", "GPU: `torch` not installed"))
 
-        # Ollama — check both instances using the values hardcoded in cogs/llm.py
-        from cogs.llm import (
-            OLLAMA_URL, OLLAMA_MODEL,
-            OLLAMA_ANALYSIS_URL, OLLAMA_ANALYSIS_MODEL,
-        )
-        for label, url, model in [
-            ("Ollama chat", OLLAMA_URL, OLLAMA_MODEL),
-            ("Ollama analysis", OLLAMA_ANALYSIS_URL, OLLAMA_ANALYSIS_MODEL),
-        ]:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    resp = await session.get(
-                        f"{url}/api/tags",
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    )
-                    data = await resp.json()
-                available = [m["name"] for m in data.get("models", [])]
-                match = any(model in m for m in available)
-                if match:
-                    checks.append(("✅", f"{label}: `{model}` ready"))
-                else:
-                    available_str = ", ".join(f"`{m}`" for m in available) or "none pulled"
-                    checks.append(("⚠️", f"{label}: reachable but `{model}` not found — available: {available_str}"))
-            except Exception as e:
-                checks.append(("❌", f"{label}: unreachable at `{url}` — {e}"))
+        # Ollama
+        from cogs.llm import OLLAMA_URL, OLLAMA_MODEL
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    f"{OLLAMA_URL}/api/tags",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
+                data = await resp.json()
+            available = [m["name"] for m in data.get("models", [])]
+            match = any(OLLAMA_MODEL in m for m in available)
+            if match:
+                checks.append(("✅", f"Ollama: `{OLLAMA_MODEL}` ready"))
+            else:
+                available_str = ", ".join(f"`{m}`" for m in available) or "none pulled"
+                checks.append(("⚠️", f"Ollama: reachable but `{OLLAMA_MODEL}` not found — available: {available_str}"))
+        except Exception as e:
+            checks.append(("❌", f"Ollama: unreachable at `{OLLAMA_URL}` — {e}"))
 
         log.info("=== Startup Diagnostics (v%s) ===", VERSION)
         for icon, msg in checks:

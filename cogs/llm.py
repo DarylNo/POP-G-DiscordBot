@@ -16,21 +16,17 @@ from cogs.profile import _fmt_duration
 
 log = logging.getLogger("popg.llm")
 
-# Chat instance — WizardLM2 on card 0 (port 11435)
-OLLAMA_URL   = "http://192.168.1.126:11435"
-OLLAMA_MODEL = "wizardlm2:7b"
-
-# Analysis instance — gemma2:9b on card 1 (port 11434)
-OLLAMA_ANALYSIS_URL   = "http://192.168.1.126:11434"
-OLLAMA_ANALYSIS_MODEL = "gemma2:9b"
+# Single Ollama instance — gemma2:9b on card 1 (port 11434)
+OLLAMA_URL   = "http://192.168.1.126:11434"
+OLLAMA_MODEL = "gemma2:9b"
 
 OLLAMA_TIMEOUT = 600
 OLLAMA_NUM_CTX = 16384  # chat default; analysis tasks pass num_ctx=None for full context
 
-# Sampling params tuned for WizardLM2
-OLLAMA_TEMPERATURE = 0.85
-OLLAMA_TOP_P       = 0.9
-OLLAMA_TOP_K       = 40
+# Sampling params — Google recommended defaults for gemma2
+OLLAMA_TEMPERATURE = 1.0
+OLLAMA_TOP_P       = 0.95
+OLLAMA_TOP_K       = 64
 
 _DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",      "20"))   # user+assistant pairs kept
 _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)))  # 2h idle expiry
@@ -278,13 +274,10 @@ async def _ollama_generate(
     *,
     messages: list[dict] | None = None,
     num_ctx: int | None = ...,  # type: ignore[assignment]
-    url: str = OLLAMA_URL,
-    model: str = OLLAMA_MODEL,
 ) -> str:
     """Call Ollama. num_ctx overrides OLLAMA_NUM_CTX for this call.
     Pass num_ctx=None to let Ollama use the model's full native context window.
     Omit num_ctx (default sentinel) to use the configured OLLAMA_NUM_CTX.
-    Pass url/model to route to a different Ollama instance.
     """
     if num_ctx is ...:  # sentinel — use the module default
         num_ctx = OLLAMA_NUM_CTX
@@ -305,8 +298,8 @@ async def _ollama_generate(
 
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
-            f"{url}/api/chat",
-            json={"model": model, "messages": messages,
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": messages,
                   "stream": False, "options": options},
             timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         )
@@ -322,16 +315,8 @@ async def _ollama_analyse(
     messages: list[dict] | None = None,
     num_ctx: int | None = None,
 ) -> str:
-    """Route to the analysis Ollama instance (gemma2:9b, port 11434).
-    Defaults to num_ctx=None (unlimited) since analysis tasks need full context.
-    """
-    return await _ollama_generate(
-        prompt, system,
-        messages=messages,
-        num_ctx=num_ctx,
-        url=OLLAMA_ANALYSIS_URL,
-        model=OLLAMA_ANALYSIS_MODEL,
-    )
+    """Analysis tasks — same instance, unlimited context by default."""
+    return await _ollama_generate(prompt, system, messages=messages, num_ctx=num_ctx)
 
 
 _SEARCH_INTENT_SYSTEM = (
