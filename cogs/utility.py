@@ -47,7 +47,7 @@ Message me directly (no `!` prefix) for a continuous chat — I'll remember the 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 **AI**
 
-**gemma2 9B**
+**Qwen 2.5 14B**
 `!chat`, DMs, `!recap`, `!when`, `!memorybuild`, memory extraction, transcript summarization
 
 **Whisper**

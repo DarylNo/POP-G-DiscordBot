@@ -16,17 +16,17 @@ from cogs.profile import _fmt_duration
 
 log = logging.getLogger("popg.llm")
 
-# Single Ollama instance — gemma2:9b on card 1 (port 11434)
+# Single Ollama instance — qwen2.5:14b across both GPUs (port 11434)
 OLLAMA_URL   = "http://192.168.1.126:11434"
-OLLAMA_MODEL = "gemma2:9b"
+OLLAMA_MODEL = "qwen2.5:14b"
 
 OLLAMA_TIMEOUT = 600
 OLLAMA_NUM_CTX = 16384  # chat default; analysis tasks pass num_ctx=None for full context
 
-# Sampling params — Google recommended defaults for gemma2
-OLLAMA_TEMPERATURE = 1.0
-OLLAMA_TOP_P       = 0.95
-OLLAMA_TOP_K       = 64
+# Sampling params — Qwen 2.5 recommended defaults
+OLLAMA_TEMPERATURE = 0.7
+OLLAMA_TOP_P       = 0.8
+OLLAMA_TOP_K       = 20
 
 _DM_MAX_HISTORY_TURNS = int(os.getenv("DM_MAX_HISTORY_TURNS",      "20"))   # user+assistant pairs kept
 _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)))  # 2h idle expiry
