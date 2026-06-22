@@ -230,7 +230,11 @@ class VoiceListener(commands.Cog):
             return
         entry = self._active[ctx.guild.id]
         entry["is_final"] = True
-        entry["vc"].stop_recording()  # triggers _recording_finished
+        # If a chunk rotation is already in progress, stop_recording() was already
+        # called and the in-flight _recording_finished will see is_final=True and
+        # handle cleanup. Calling it again raises AssertionError.
+        if not entry["rotating"]:
+            entry["vc"].stop_recording()
 
     # ------------------------------------------------------------------ #
     #  Audio processing                                                    #
