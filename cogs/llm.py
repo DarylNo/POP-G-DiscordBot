@@ -36,6 +36,10 @@ _DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",         "3000")) # c
 _CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS", "40"))   # more turns for shared channels (includes ambient chatter)
 _AMBIENT_MSG_MAX_CHARS = 500  # cap per absorbed channel message
 
+# Live voice-session context injected into chats while recording is active
+_VOICE_CTX_SEGMENTS  = 40    # most recent transcript lines shown
+_VOICE_CTX_MAX_CHARS = 4000  # hard cap on injected transcript text
+
 # Write-through in-memory caches over the DB tables.
 # user_id → {"messages": list[dict], "last_active": datetime}
 _dm_sessions: dict[int, dict] = {}
@@ -132,7 +136,12 @@ _CHAT_SYSTEM = (
     "'Is there anything else I can help with?'). Just stop when you're done.\n"
     "You have stored memories from past voice sessions, chat, and game history. "
     "NEVER say you don't have access to voice chats or conversations — your memories ARE that access. "
-    "When a memory is relevant, use it to answer directly."
+    "When a memory is relevant, use it to answer directly.\n"
+    "When a [Live voice session] block is provided, you are sitting in that voice channel right now — "
+    "answer questions about who's there, what they're playing, and what they've been talking about "
+    "directly from it. The transcript updates in ~5-minute chunks, so the last few minutes may not "
+    "have landed yet. If someone asks about voice and NO live block is provided, you're not in a "
+    "voice channel right now (an admin starts one with !join)."
 )
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
@@ -358,16 +367,16 @@ async def _ollama_analyse(
 
 
 _SEARCH_INTENT_SYSTEM = (
-    "You decide whether to search the web before answering. Default to SEARCH.\n"
-    "Only reply NOOP if the question is clearly timeless — pure math, basic science, "
-    "how something works conceptually, or casual chat with no factual lookup needed.\n"
-    "Always search for:\n"
+    "You decide whether to search the web before answering.\n"
+    "Reply NOOP for casual conversation: banter, jokes, opinions, questions about "
+    "server members, past gaming sessions, or anything the ongoing chat itself answers. "
+    "Most barroom chatter needs no search.\n"
+    "Reply SEARCH when external, current facts would clearly improve the answer:\n"
     "- Anything about a specific game (weapons, builds, tier lists, strategies, meta, updates, DLC, servers)\n"
     "- Prices, availability, release dates, store listings\n"
     "- Current events, news, sports scores, weather\n"
     "- Software, apps, hardware — versions, compatibility, errors, drivers\n"
-    "- Anything the user could google for a better answer than your training data\n"
-    "When in doubt, search. A search that wasn't needed costs nothing; a wrong answer does.\n"
+    "- Factual lookups where your training data may be stale or wrong\n"
     "If you should search, reply with exactly: SEARCH: <concise search query>\n"
     "If this is definitively a timeless question, reply with exactly: NOOP"
 )
@@ -1123,6 +1132,11 @@ class LLM(commands.Cog):
         system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id, relevant_mems)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(session["messages"])
+        # Live voice awareness — if a recording session is running, Toaster can
+        # answer questions about it (who's there, what's being said)
+        voice_ctx = self._live_voice_context()
+        if voice_ctx:
+            full_messages.append({"role": "system", "content": voice_ctx})
         # Inject relevant memories right before the question so they're impossible to miss
         if relevant_mems:
             full_messages.append({
@@ -1213,6 +1227,53 @@ class LLM(commands.Cog):
     async def chat_error(self, ctx: commands.Context, error: Exception) -> None:
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"Slow down a sec — try again in {error.retry_after:.0f}s.")
+
+    def _live_voice_context(self) -> str | None:
+        """Snapshot of the active voice recording session, or None if not recording.
+
+        Injected into every chat so Toaster can answer questions about the
+        ongoing voice channel: who's in it, what they're playing, and what
+        they've been saying (transcribed so far).
+        """
+        vl = self.bot.cogs.get("VoiceListener")
+        if vl is None:
+            return None
+        entry = getattr(vl, "_active", {}).get(config.GUILD_ID)
+        if entry is None or entry.get("is_final"):
+            return None
+
+        import time as _time
+        from cogs.voice_listener import _get_game_label
+
+        elapsed = _time.monotonic() - entry["session_start"]
+        channel = entry["vc"].channel
+        channel_name = channel.name if channel else "unknown"
+        parts = [f"[Live voice session] Recording '{channel_name}' — "
+                 f"{_fmt_timestamp(elapsed)} in (session #{entry['session_id']})."]
+
+        if channel:
+            member_bits = []
+            for m in channel.members:
+                if m.bot:
+                    continue
+                label = _get_game_label(m)
+                member_bits.append(
+                    f"{m.display_name} ({'idle/chatting' if label == 'idle' else 'playing ' + label})"
+                )
+            if member_bits:
+                parts.append("In the channel: " + ", ".join(member_bits))
+
+        segments = database.get_transcript_segments(entry["session_id"])
+        if segments:
+            recent = segments[-_VOICE_CTX_SEGMENTS:]
+            text = _build_transcript_text(recent)
+            if len(text) > _VOICE_CTX_MAX_CHARS:
+                text = text[-_VOICE_CTX_MAX_CHARS:]
+            parts.append("Voice transcript so far (most recent lines):\n" + text)
+        else:
+            parts.append("No speech transcribed yet (first chunk still in progress).")
+
+        return "\n".join(parts)
 
     def _absorb_channel_message(self, message: discord.Message) -> None:
         """Store a channel message in the chat session as passive context (no reply)."""

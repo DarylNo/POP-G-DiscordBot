@@ -29,6 +29,7 @@ _USER_COMMANDS_BOTTOM = """
 **Ask the AI**
 `!chat <message>` — Chat with Toaster (alias `!ask`)
 **@Toaster** or reply to one of my messages — I read the channel like a barkeep, so I already have the context
+While a voice recording is running, ask me about it — who's in there, what they're playing, what's been said
 `!memories [page]` — See what Toaster remembers
 `!reset` — DM: clear your history · Server (admin): clear this channel's chat history
 `!reset all` — (admin) also wipe Toaster's server-wide memories
