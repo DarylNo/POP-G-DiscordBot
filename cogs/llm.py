@@ -4,6 +4,7 @@ import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -53,6 +54,27 @@ _AMBIENT_MEMORY_SYSTEM = (
     "Ignore small talk and banter with no lasting information. "
     "Only include what is explicitly stated. "
     "Reply with a concise bullet list. If nothing notable, reply with exactly: NONE"
+)
+
+# --- Auto-posting (barkeep speaks unprompted) ---
+# All auto-posts pass through one governor: a global minimum gap bounds TOTAL
+# unprompted output regardless of behavior, and each behavior has its own
+# cooldown on top. `!barkeep quiet` mutes all of it (persisted).
+ANNOUNCE_CHANNEL_ID   = int(os.getenv("ANNOUNCE_CHANNEL_ID", "0"))  # 0 → guild system channel
+AUTO_POST_MIN_GAP     = int(os.getenv("AUTO_POST_MIN_GAP", "600"))    # 10 min between ANY auto-posts
+CHIME_COOLDOWN        = int(os.getenv("CHIME_COOLDOWN", "2700"))      # 45 min between ambient chime-ins
+CHIME_CONSIDER_EVERY  = int(os.getenv("CHIME_CONSIDER_EVERY", "20"))  # absorbed msgs between chime considerations
+GREETING_COOLDOWN     = int(os.getenv("GREETING_COOLDOWN", "1800"))   # 30 min between voice greetings
+
+_CHIME_SYSTEM = (
+    "You are Toaster, a barkeep bot in the POPG Discord — a group of adult friends. "
+    "You've been quietly listening to this channel. Decide whether to chime in ONCE, "
+    "unprompted, like a barkeep who occasionally drops a dry one-liner.\n"
+    "Stay silent (this is the common case) unless you have something genuinely funny, "
+    "useful, or warm to add. Never force it. Never ask questions to keep talk going. "
+    "Never repeat what someone already said.\n"
+    "Reply with exactly NOOP to stay quiet, or 'CHIME: <your one short line>' to speak. "
+    "Default heavily to NOOP."
 )
 
 # Write-through in-memory caches over the DB tables.
@@ -881,6 +903,12 @@ class LLM(commands.Cog):
         self._barkeep_optout: set[int] = set(database.get_barkeep_optouts())
         # Absorbed lines awaiting ambient memory extraction
         self._ambient_pending: list[str] = []
+        # Auto-post governor state
+        self._quiet = database.get_flag("auto_post_quiet", "0") == "1"
+        self._last_auto_post: datetime | None = None
+        self._last_chime: datetime | None = None
+        self._last_greeting: datetime | None = None
+        self._chime_counter: dict[int, int] = {}   # channel_id → absorbed-msg count
         self._daily_stats_task.start()
 
     def cog_unload(self) -> None:
@@ -1397,6 +1425,107 @@ class LLM(commands.Cog):
 
         return "\n".join(parts)
 
+    # ------------------------------------------------------------------ #
+    #  Auto-posting governor (barkeep speaks unprompted)                   #
+    # ------------------------------------------------------------------ #
+
+    def _announce_channel(self) -> Optional["discord.abc.Messageable"]:
+        guild = self.bot.get_guild(config.GUILD_ID)
+        if guild is None:
+            return None
+        if ANNOUNCE_CHANNEL_ID:
+            ch = guild.get_channel(ANNOUNCE_CHANNEL_ID)
+            if isinstance(ch, discord.TextChannel):
+                return ch
+        return guild.system_channel
+
+    def _can_auto_post(self, kind: str) -> bool:
+        """Global governor: quiet mode off, min gap since ANY auto-post, and
+        the per-behavior cooldown all have to pass."""
+        if self._quiet:
+            return False
+        now = datetime.now(timezone.utc)
+        if self._last_auto_post and (now - self._last_auto_post).total_seconds() < AUTO_POST_MIN_GAP:
+            return False
+        if kind == "chime" and self._last_chime and \
+                (now - self._last_chime).total_seconds() < CHIME_COOLDOWN:
+            return False
+        if kind == "greeting" and self._last_greeting and \
+                (now - self._last_greeting).total_seconds() < GREETING_COOLDOWN:
+            return False
+        return True
+
+    async def _auto_post(self, text: str, *, kind: str,
+                         channel: Optional["discord.abc.Messageable"] = None) -> bool:
+        """Send an unprompted message if the governor allows. Returns True if sent."""
+        if not self._can_auto_post(kind):
+            return False
+        dest = channel or self._announce_channel()
+        if dest is None:
+            return False
+        try:
+            await dest.send(text)
+        except Exception:
+            log.warning("Auto-post (%s) failed to send", kind, exc_info=True)
+            return False
+        now = datetime.now(timezone.utc)
+        self._last_auto_post = now
+        if kind == "chime":
+            self._last_chime = now
+        elif kind == "greeting":
+            self._last_greeting = now
+        log.info("Auto-post (%s): %s", kind, text[:80])
+        return True
+
+    @commands.Cog.listener()
+    async def on_popg_voice_joined(self, channel_name: str, member_names: list[str]) -> None:
+        """Fired when the barkeep auto-joins a voice channel — greet the room."""
+        if len(member_names) == 1:
+            who = member_names[0]
+        elif len(member_names) == 2:
+            who = f"{member_names[0]} and {member_names[1]}"
+        else:
+            who = f"{', '.join(member_names[:-1])}, and {member_names[-1]}"
+        text = f"🍺 Pulled up a stool in **{channel_name}** — evening, {who}."
+        await self._auto_post(text, kind="greeting")
+
+    @commands.Cog.listener()
+    async def on_popg_milestone(self, events: list[dict]) -> None:
+        """Fired by tracking when a member crosses a streak/playtime milestone."""
+        for ev in events:
+            if ev["type"] == "streak":
+                text = (f"🍺 {ev['display_name']} is on a **{ev['value']}-day streak**. "
+                        f"Round's on the house.")
+            elif ev["type"] == "playtime":
+                text = (f"🎮 {ev['display_name']} just crossed **{ev['value']}h in "
+                        f"{ev['game_name']}**. That's dedication (or a problem).")
+            else:
+                continue
+            if not await self._auto_post(text, kind="milestone"):
+                break  # governor closed the bar — don't spam the rest
+
+    async def _maybe_chime_in(self, channel: "discord.abc.Messageable", session: dict) -> None:
+        """Occasionally add an unprompted one-liner to channel banter."""
+        if not self._can_auto_post("chime"):
+            return
+        history = [_strip_message(m) for m in session["messages"][-12:]]
+        if len(history) < 4:
+            return
+        messages = [{"role": "system", "content": _CHIME_SYSTEM}, *history]
+        try:
+            result = await asyncio.wait_for(_ollama_generate(messages=messages), timeout=60)
+        except Exception:
+            return
+        if not result or not result.strip().upper().startswith("CHIME:"):
+            return
+        line = result.split(":", 1)[1].strip()
+        if not line:
+            return
+        if await self._auto_post(line, kind="chime", channel=channel):
+            # Record its own line so it has continuity if addressed next
+            session["messages"].append({"role": "assistant", "content": line})
+            database.save_channel_chat_history(channel.id, session["messages"])
+
     def _absorb_channel_message(self, message: discord.Message) -> None:
         """Store a channel message as passive context (no reply).
 
@@ -1431,6 +1560,14 @@ class LLM(commands.Cog):
         if len(self._ambient_pending) >= _AMBIENT_MEMORY_EVERY:
             batch, self._ambient_pending = self._ambient_pending, []
             _spawn(self._extract_ambient_memories(batch))
+
+        # Occasionally consider chiming in (heavily rate-limited by the governor)
+        cid = message.channel.id
+        self._chime_counter[cid] = self._chime_counter.get(cid, 0) + 1
+        if self._chime_counter[cid] >= CHIME_CONSIDER_EVERY:
+            self._chime_counter[cid] = 0
+            if self._can_auto_post("chime"):
+                _spawn(self._maybe_chime_in(message.channel, session))
 
     async def _extract_ambient_memories(self, lines: list[str]) -> None:
         """Extract memorable facts from a batch of absorbed channel chatter."""
@@ -1624,17 +1761,38 @@ class LLM(commands.Cog):
     @commands.guild_only()
     @commands.command(name="barkeep")
     async def barkeep(self, ctx: commands.Context, mode: str = None) -> None:
-        """Admin: `!barkeep off` stops Toaster reading this channel; `!barkeep on` resumes."""
+        """Admin barkeep controls:
+          `!barkeep on|off`     — toggle reading THIS channel
+          `!barkeep quiet|speak` — mute / unmute all unprompted auto-posts (server-wide)
+        """
         from cogs.admin import _is_admin
         if not _is_admin(ctx):
             await ctx.send("Admin only.")
             return
-        if mode is None or mode.lower() not in ("on", "off"):
-            state = "OFF" if ctx.channel.id in self._barkeep_optout else "ON"
-            await ctx.send(f"Barkeep listening in this channel is **{state}**. "
-                           f"Use `!barkeep on` / `!barkeep off` to change it.")
+
+        m = (mode or "").lower()
+
+        # Global auto-post mute
+        if m in ("quiet", "speak", "loud"):
+            self._quiet = (m == "quiet")
+            database.set_flag("auto_post_quiet", "1" if self._quiet else "0")
+            if self._quiet:
+                await ctx.send("Auto-posts muted — Toaster won't speak unless spoken to.")
+            else:
+                await ctx.send("Auto-posts on — Toaster may greet voice, mark milestones, "
+                               "and occasionally chime in.")
             return
-        if mode.lower() == "off":
+
+        # Per-channel read toggle
+        if m not in ("on", "off"):
+            read = "OFF" if ctx.channel.id in self._barkeep_optout else "ON"
+            posts = "MUTED" if self._quiet else "ON"
+            await ctx.send(
+                f"Reading this channel: **{read}** · Auto-posts (server-wide): **{posts}**\n"
+                f"`!barkeep on|off` toggles reading here; `!barkeep quiet|speak` toggles auto-posts."
+            )
+            return
+        if m == "off":
             self._barkeep_optout.add(ctx.channel.id)
             database.add_barkeep_optout(ctx.channel.id)
             await ctx.send("Toaster is no longer reading this channel. "

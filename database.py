@@ -143,6 +143,16 @@ def init_db() -> None:
             channel_id INTEGER PRIMARY KEY
         );
 
+        CREATE TABLE IF NOT EXISTS kv_store (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS announced_milestones (
+            key         TEXT PRIMARY KEY,   -- e.g. 'streak:123:30' or 'game:123:Hunt:100'
+            announced_at TEXT NOT NULL
+        );
+
     """)
     # Migrations for existing databases
     for migration in [
@@ -595,6 +605,8 @@ def wipe_all_data() -> dict[str, int]:
         "chat_messages",
         "watched_channels",
         "barkeep_optout",
+        "kv_store",
+        "announced_milestones",
         "memories",
         "dm_history",
         "channel_chat_history",
@@ -828,6 +840,73 @@ def get_barkeep_optouts() -> list[int]:
     conn = get_conn()
     rows = conn.execute("SELECT channel_id FROM barkeep_optout").fetchall()
     return [r["channel_id"] for r in rows]
+
+
+# --- Key-value store (small persistent flags, e.g. auto-post quiet mode) ---
+
+def get_flag(name: str, default: str = "") -> str:
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM kv_store WHERE key=?", (name,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_flag(name: str, value: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)", (name, value)
+    )
+    conn.commit()
+
+
+# --- Milestone detection (streaks, playtime) for auto-posts ---
+
+_STREAK_MILESTONES   = (7, 14, 30, 60, 100, 182, 365)
+_PLAYTIME_MILESTONES = (10, 25, 50, 100, 250, 500, 1000)  # hours, per game
+
+
+def check_and_record_milestones(user_id: int) -> list[dict]:
+    """Return newly-crossed milestones for a user and mark them announced.
+
+    Idempotent: each milestone is recorded in announced_milestones so it fires
+    exactly once, even across restarts. Returns [] when nothing is new.
+    """
+    conn = get_conn()
+    events: list[dict] = []
+
+    def _claim(key: str) -> bool:
+        try:
+            conn.execute(
+                "INSERT INTO announced_milestones (key, announced_at) VALUES (?, ?)",
+                (key, _now()),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False  # already announced
+
+    user = conn.execute("SELECT display_name FROM users WHERE user_id=?", (user_id,)).fetchone()
+    if not user:
+        return []
+    name = user["display_name"]
+
+    current_streak, _ = get_streaks(user_id)
+    for m in _STREAK_MILESTONES:
+        if current_streak >= m and _claim(f"streak:{user_id}:{m}"):
+            events.append({"type": "streak", "user_id": user_id,
+                           "display_name": name, "value": m})
+
+    games = conn.execute(
+        "SELECT game_name, total_seconds FROM game_stats WHERE user_id=?", (user_id,)
+    ).fetchall()
+    for g in games:
+        hours = g["total_seconds"] / 3600
+        for m in _PLAYTIME_MILESTONES:
+            if hours >= m and _claim(f"game:{user_id}:{g['game_name']}:{m}"):
+                events.append({"type": "playtime", "user_id": user_id,
+                               "display_name": name, "game_name": g["game_name"],
+                               "value": m})
+
+    conn.commit()
+    return events
 
 
 def log_message(message_id: int, channel_id: int, user_id: int, username: str, content: str, sent_at: str) -> None:

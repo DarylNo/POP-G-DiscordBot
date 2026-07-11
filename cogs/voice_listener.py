@@ -510,6 +510,8 @@ class VoiceListener(commands.Cog):
         try:
             vc.start_recording(TimestampedSink(), self._recording_finished, guild.id)
             log.info("Session %d: auto-joined '%s' (%d members)", session_id, channel.name, len(humans))
+            self.bot.dispatch("popg_voice_joined", channel.name,
+                              [m.display_name for m in humans])
         except Exception:
             self._active.pop(guild.id, None)
             database.close_transcript_session(session_id)
