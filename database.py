@@ -139,6 +139,10 @@ def init_db() -> None:
             PRIMARY KEY (scope_type, scope_id)
         );
 
+        CREATE TABLE IF NOT EXISTS barkeep_optout (
+            channel_id INTEGER PRIMARY KEY
+        );
+
     """)
     # Migrations for existing databases
     for migration in [
@@ -590,6 +594,7 @@ def wipe_all_data() -> dict[str, int]:
         "game_partners",
         "chat_messages",
         "watched_channels",
+        "barkeep_optout",
         "memories",
         "dm_history",
         "channel_chat_history",
@@ -805,36 +810,24 @@ def get_streaks(user_id: int) -> tuple[int, int]:
     return current, longest
 
 
-# --- Chat logging ---
+# --- Chat archive (all guild messages, written by barkeep absorption) ---
 
-def add_watched_channel(channel_id: int, channel_name: str, added_by: int) -> None:
+def add_barkeep_optout(channel_id: int) -> None:
     conn = get_conn()
-    conn.execute(
-        "INSERT OR IGNORE INTO watched_channels (channel_id, channel_name, added_at, added_by) VALUES (?, ?, ?, ?)",
-        (channel_id, channel_name, _now(), added_by),
-    )
+    conn.execute("INSERT OR IGNORE INTO barkeep_optout (channel_id) VALUES (?)", (channel_id,))
     conn.commit()
 
 
-def remove_watched_channel(channel_id: int) -> bool:
+def remove_barkeep_optout(channel_id: int) -> None:
     conn = get_conn()
-    affected = conn.execute(
-        "DELETE FROM watched_channels WHERE channel_id=?", (channel_id,)
-    ).rowcount
+    conn.execute("DELETE FROM barkeep_optout WHERE channel_id=?", (channel_id,))
     conn.commit()
-    return affected > 0
 
 
-def get_watched_channels() -> list[int]:
+def get_barkeep_optouts() -> list[int]:
     conn = get_conn()
-    rows = conn.execute("SELECT channel_id FROM watched_channels").fetchall()
+    rows = conn.execute("SELECT channel_id FROM barkeep_optout").fetchall()
     return [r["channel_id"] for r in rows]
-
-
-def get_watched_channels_detail() -> list[dict]:
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM watched_channels ORDER BY added_at").fetchall()
-    return [dict(r) for r in rows]
 
 
 def log_message(message_id: int, channel_id: int, user_id: int, username: str, content: str, sent_at: str) -> None:
@@ -854,11 +847,6 @@ def get_recent_messages(channel_id: int, limit: int = 100) -> list[dict]:
         (channel_id, limit),
     ).fetchall()
     return [dict(r) for r in reversed(rows)]
-
-
-def get_messages_for_llm(channel_id: int, limit: int = 200) -> list[dict]:
-    """Return messages as plain dicts ready to serialize into an LLM prompt."""
-    return get_recent_messages(channel_id, limit)
 
 
 # --- DM conversation history ---

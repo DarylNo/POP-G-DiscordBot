@@ -19,6 +19,10 @@ WHISPER_DEVICE     = os.getenv("WHISPER_DEVICE", "cpu")
 # How often to rotate the audio buffer and run Whisper (seconds). Lower = more
 # frequent transcription, smaller memory footprint, but more Whisper CPU cycles.
 VOICE_CHUNK_SECS   = int(os.getenv("VOICE_CHUNK_SECS", "300"))   # 5 minutes
+# Barkeep: automatically join & record when friends gather in voice, and leave
+# when the channel empties. Set VOICE_AUTO_RECORD=0 to require manual !join.
+VOICE_AUTO_RECORD      = os.getenv("VOICE_AUTO_RECORD", "1").lower() not in ("0", "false", "no")
+VOICE_AUTO_MIN_MEMBERS = int(os.getenv("VOICE_AUTO_MIN_MEMBERS", "2"))
 
 try:
     import whisper as _whisper
@@ -145,7 +149,8 @@ class VoiceListener(commands.Cog):
         self,
         vc: discord.VoiceClient,
         session_id: int,
-        notify_channel: discord.TextChannel,
+        notify_channel: Optional[discord.TextChannel],
+        auto: bool = False,
     ) -> dict:
         return {
             "vc":           vc,
@@ -156,6 +161,7 @@ class VoiceListener(commands.Cog):
             "is_final":      False,               # True when !leave called
             "rotating":      False,               # True while a rotation is in-flight
             "proc_lock":     asyncio.Lock(),      # serializes chunk processing per session
+            "auto":          auto,                # True when auto-joined (barkeep mode)
         }
 
     # ------------------------------------------------------------------ #
@@ -482,6 +488,56 @@ class VoiceListener(commands.Cog):
         database.add_transcript_segment(entry["session_id"], user_id, "[Session]", ts, text)
         log.info("Session %d event @ %.1fs: %s", entry["session_id"], ts, text)
 
+    async def _maybe_auto_join(self, guild: discord.Guild, channel: discord.VoiceChannel) -> None:
+        """Barkeep: join and start recording when enough friends gather in voice."""
+        if not VOICE_AUTO_RECORD or self._model is None:
+            return
+        if guild.id in self._active:
+            return
+        humans = [m for m in channel.members if not m.bot]
+        if len(humans) < VOICE_AUTO_MIN_MEMBERS:
+            return
+
+        try:
+            vc = await channel.connect()
+        except Exception:
+            log.exception("Auto-join failed for channel %s", channel.name)
+            return
+
+        session_id = database.open_transcript_session(channel.id, channel.name)
+        entry = self._make_entry(vc, session_id, guild.system_channel, auto=True)
+        self._active[guild.id] = entry
+        try:
+            vc.start_recording(TimestampedSink(), self._recording_finished, guild.id)
+            log.info("Session %d: auto-joined '%s' (%d members)", session_id, channel.name, len(humans))
+        except Exception:
+            self._active.pop(guild.id, None)
+            database.close_transcript_session(session_id)
+            database.set_transcript_status(session_id, "failed")
+            try:
+                await vc.disconnect()
+            except Exception:
+                pass
+            log.exception("Auto-join start_recording failed for channel %s", channel.name)
+
+    def _maybe_auto_leave(self, guild_id: int, entry: dict) -> None:
+        """Barkeep: finalize an auto session when the channel empties."""
+        if not entry.get("auto") or entry["is_final"]:
+            return
+        channel = entry["vc"].channel
+        if channel is None:
+            return
+        if any(not m.bot for m in channel.members):
+            return
+        log.info("Session %d: channel empty — auto-leaving.", entry["session_id"])
+        entry["is_final"] = True
+        if not entry["rotating"]:
+            try:
+                entry["vc"].stop_recording()
+            except Exception:
+                entry["is_final"] = False
+                self._spawn(self._abort_session(guild_id, "channel emptied"))
+
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -491,6 +547,8 @@ class VoiceListener(commands.Cog):
     ) -> None:
         entry = self._active.get(member.guild.id)
         if entry is None:
+            if not member.bot and after.channel is not None:
+                self._spawn(self._maybe_auto_join(member.guild, after.channel))
             return
 
         # The bot itself was kicked, disconnected, or dragged to another channel
@@ -509,6 +567,7 @@ class VoiceListener(commands.Cog):
         if before.channel == recorded and after.channel != recorded:
             self._record_event(member.guild.id, member.id,
                                f"{member.display_name} left the voice channel")
+            self._maybe_auto_leave(member.guild.id, entry)
         elif before.channel != recorded and after.channel == recorded:
             self._record_event(member.guild.id, member.id,
                                f"{member.display_name} joined the voice channel")

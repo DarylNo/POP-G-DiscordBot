@@ -40,6 +40,21 @@ _AMBIENT_MSG_MAX_CHARS = 500  # cap per absorbed channel message
 _VOICE_CTX_SEGMENTS  = 40    # most recent transcript lines shown
 _VOICE_CTX_MAX_CHARS = 4000  # hard cap on injected transcript text
 
+# Ambient memory: every N absorbed channel messages, extract memorable facts
+# from the batch — the barkeep remembers things said in the bar even when
+# nobody was talking to it.
+_AMBIENT_MEMORY_EVERY = int(os.getenv("AMBIENT_MEMORY_EVERY", "50"))
+
+_AMBIENT_MEMORY_SYSTEM = (
+    "Extract facts worth remembering long-term from this Discord text-chat excerpt "
+    'from "Past our Prime Gamers" (POPG). Focus on: schedules and availability '
+    "(work shifts, vacations, 'on nights next week'), plans (game sessions, meetups), "
+    "life events, strong preferences, inside jokes, purchases, and decisions. "
+    "Ignore small talk and banter with no lasting information. "
+    "Only include what is explicitly stated. "
+    "Reply with a concise bullet list. If nothing notable, reply with exactly: NONE"
+)
+
 # Write-through in-memory caches over the DB tables.
 # user_id → {"messages": list[dict], "last_active": datetime}
 _dm_sessions: dict[int, dict] = {}
@@ -263,6 +278,29 @@ def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
     return pages or ["(empty)"]
 
 
+def _strip_message(m: dict) -> dict:
+    """Reduce a stored message to the keys Ollama accepts (drops e.g. 'ambient')."""
+    return {"role": m["role"], "content": m["content"]}
+
+
+def _trim_session(messages: list[dict], max_items: int) -> list[dict]:
+    """Trim to max_items, dropping oldest AMBIENT messages first so channel
+    banter can't flush Toaster's actual conversations out of context."""
+    if len(messages) <= max_items:
+        return messages
+    overflow = len(messages) - max_items
+    dropped = 0
+    kept: list[dict] = []
+    for m in messages:
+        if dropped < overflow and m.get("ambient"):
+            dropped += 1
+            continue
+        kept.append(m)
+    if dropped < overflow:
+        kept = kept[overflow - dropped:]
+    return kept
+
+
 def _get_dm_session(user_id: int) -> dict:
     """Return the in-memory DM session for a user, loading from DB on cache miss.
 
@@ -416,7 +454,7 @@ async def _maybe_search(history: list[dict], user_text: str, *, intent_check: bo
 
     intent_messages = [
         {"role": "system", "content": _SEARCH_INTENT_SYSTEM},
-        *history[-4:],
+        *[_strip_message(m) for m in history[-4:]],
         {"role": "user", "content": user_text},
     ]
     try:
@@ -839,6 +877,10 @@ class LLM(commands.Cog):
         self.bot = bot
         # on_ready fires on every gateway reconnect — recovery must run once
         self._startup_recovery_done = False
+        # Channels where ambient absorption is disabled (!barkeep off)
+        self._barkeep_optout: set[int] = set(database.get_barkeep_optouts())
+        # Absorbed lines awaiting ambient memory extraction
+        self._ambient_pending: list[str] = []
         self._daily_stats_task.start()
 
     def cog_unload(self) -> None:
@@ -1213,7 +1255,7 @@ class LLM(commands.Cog):
 
         system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id, relevant_mems)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
-        full_messages.extend(session["messages"])
+        full_messages.extend(_strip_message(m) for m in session["messages"])
         # Live voice awareness — if a recording session is running, Toaster can
         # answer questions about it (who's there, what's being said)
         voice_ctx = self._live_voice_context()
@@ -1245,9 +1287,7 @@ class LLM(commands.Cog):
         session["messages"].append({"role": "user",      "content": user_content})
         session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
-        max_items = max_turns * 2
-        if len(session["messages"]) > max_items:
-            session["messages"] = session["messages"][-max_items:]
+        session["messages"] = _trim_session(session["messages"], max_turns * 2)
         persist(session["messages"])
 
         # Timing subtext: LLM generation time, plus the total when context
@@ -1358,19 +1398,60 @@ class LLM(commands.Cog):
         return "\n".join(parts)
 
     def _absorb_channel_message(self, message: discord.Message) -> None:
-        """Store a channel message in the chat session as passive context (no reply)."""
+        """Store a channel message as passive context (no reply).
+
+        Also archives it permanently to chat_messages and batches it for
+        ambient memory extraction — the barkeep remembers things said in the
+        bar even when nobody was addressing it.
+        """
+        if message.channel.id in self._barkeep_optout:
+            return
         text = message.content.strip()
         if not text:
             return
+        line = f"{message.author.display_name}: {text[:_AMBIENT_MSG_MAX_CHARS]}"
+
         session = _get_ch_session(message.channel.id)
-        session["messages"].append({
-            "role": "user",
-            "content": f"{message.author.display_name}: {text[:_AMBIENT_MSG_MAX_CHARS]}",
-        })
-        max_items = _CH_MAX_HISTORY_TURNS * 2
-        if len(session["messages"]) > max_items:
-            session["messages"] = session["messages"][-max_items:]
+        session["messages"].append({"role": "user", "content": line, "ambient": True})
+        session["messages"] = _trim_session(session["messages"], _CH_MAX_HISTORY_TURNS * 2)
         database.save_channel_chat_history(message.channel.id, session["messages"])
+
+        # Permanent archive (replaces the old !log watch system)
+        database.log_message(
+            message_id=message.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            username=str(message.author),
+            content=message.content,
+            sent_at=message.created_at.replace(tzinfo=timezone.utc).isoformat(),
+        )
+
+        # Batch for ambient memory extraction
+        self._ambient_pending.append(line)
+        if len(self._ambient_pending) >= _AMBIENT_MEMORY_EVERY:
+            batch, self._ambient_pending = self._ambient_pending, []
+            _spawn(self._extract_ambient_memories(batch))
+
+    async def _extract_ambient_memories(self, lines: list[str]) -> None:
+        """Extract memorable facts from a batch of absorbed channel chatter."""
+        try:
+            result = await asyncio.wait_for(
+                _ollama_analyse(messages=[
+                    {"role": "system", "content": _AMBIENT_MEMORY_SYSTEM},
+                    {"role": "user", "content": "\n".join(lines)},
+                ]),
+                timeout=_MEMORY_EXTRACT_TIMEOUT,
+            )
+        except Exception:
+            log.warning("Ambient memory extraction failed — batch dropped")
+            return
+        if not result or result.strip().upper() == "NONE":
+            return
+        facts = [l.lstrip("•-* 0123456789.)").strip() for l in result.splitlines()]
+        facts = [f for f in facts if f and f.upper() != "NONE"]
+        if facts:
+            await _merge_memories("guild", config.GUILD_ID, facts)
+            log.info("Ambient memory: stored %d fact(s) from %d chat lines", len(facts), len(lines))
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -1539,6 +1620,29 @@ class LLM(commands.Cog):
         database.save_memories(scope_type, scope_id, backup)
         await ctx.send(f"Restored {len(backup)} memories from the pre-consolidation backup "
                        f"(replaced {current}).")
+
+    @commands.guild_only()
+    @commands.command(name="barkeep")
+    async def barkeep(self, ctx: commands.Context, mode: str = None) -> None:
+        """Admin: `!barkeep off` stops Toaster reading this channel; `!barkeep on` resumes."""
+        from cogs.admin import _is_admin
+        if not _is_admin(ctx):
+            await ctx.send("Admin only.")
+            return
+        if mode is None or mode.lower() not in ("on", "off"):
+            state = "OFF" if ctx.channel.id in self._barkeep_optout else "ON"
+            await ctx.send(f"Barkeep listening in this channel is **{state}**. "
+                           f"Use `!barkeep on` / `!barkeep off` to change it.")
+            return
+        if mode.lower() == "off":
+            self._barkeep_optout.add(ctx.channel.id)
+            database.add_barkeep_optout(ctx.channel.id)
+            await ctx.send("Toaster is no longer reading this channel. "
+                           "(@mentions still work; `!barkeep on` to resume.)")
+        else:
+            self._barkeep_optout.discard(ctx.channel.id)
+            database.remove_barkeep_optout(ctx.channel.id)
+            await ctx.send("Toaster is reading this channel again.")
 
     @commands.command(name="reset")
     async def reset_dm(self, ctx: commands.Context, scope: str = None) -> None:
