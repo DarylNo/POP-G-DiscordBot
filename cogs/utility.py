@@ -28,6 +28,8 @@ _WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online
 _USER_COMMANDS_BOTTOM = """
 **Ask the AI**
 `!chat <message>` — Chat with Toaster (alias `!ask`)
+**@Toaster** or reply to one of my messages — chat without the prefix
+`!memories [page]` — See what Toaster remembers
 `!reset` — DM: clear your history · Server (admin): clear this channel's chat history
 `!reset all` — (admin) also wipe Toaster's server-wide memories
 
@@ -57,7 +59,11 @@ ADMIN_VOICE_COMMANDS = """
 **Voice Recording (Admin)**
 `!join [#channel]` — Bot joins voice and starts recording
 `!leave` — Stop recording and process transcript + summary
-`!memorybuild` — Rebuild Toaster's memory from all stored transcripts
+
+**Memory Management (Admin)**
+`!memorybuild [full]` — Backfill memories (`full` = wipe and re-extract everything)
+`!forget <number|text>` — Remove a specific memory (see `!memories`)
+`!memoryrestore` — Undo a bad consolidation or full rebuild from backup
 """.strip()
 
 ADMIN_COMMANDS = """

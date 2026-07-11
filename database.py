@@ -1075,6 +1075,16 @@ def get_transcripts_pending_memory() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def reset_memory_extraction() -> int:
+    """Mark all completed transcripts as not-yet-extracted (for a full memory rebuild)."""
+    conn = get_conn()
+    affected = conn.execute(
+        "UPDATE voice_transcripts SET memory_extracted=0 WHERE status='done'"
+    ).rowcount
+    conn.commit()
+    return affected
+
+
 def get_transcripts_stuck_processing() -> list[dict]:
     """Return ended sessions stuck in 'processing' (bot died mid-summary)."""
     conn = get_conn()
