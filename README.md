@@ -1,8 +1,8 @@
 # POPG Discord Bot — Toaster
 
-The Discord bot for **Past our Prime Gamers**. Silently tracks member activity, runs an AI chat assistant powered by local LLMs, and transcribes voice sessions.
+The Discord bot for **Past our Prime Gamers**. A local-LLM "barkeep" that hangs out in the server — passively reading chat, auto-transcribing voice, and answering when addressed — while silently tracking member activity in the background.
 
-Current version: **1.11.0**
+Current version: **1.13.0**
 
 ---
 
@@ -17,13 +17,13 @@ Presence, gaming, and voice activity are recorded automatically with no configur
 | Gaming (game name + duration) | Activity events |
 | Voice channel presence | Voice state events |
 
-All data is stored locally in a SQLite database (`popg.db`). Nothing is posted to channels automatically.
+All data is stored locally in a SQLite database (`popg.db`). Toaster never posts to channels on its own — it only replies when addressed.
 
-### AI assistant (Toaster)
-`!chat` and DMs go to **Qwen 2.5 14B** running on a dedicated dual-GPU Ollama machine. Toaster has persistent memory built from voice session transcripts, chat history, and game stats — it remembers what happened in past sessions and can reference them in conversation. It can also search the web and read linked pages for current info.
+### AI assistant (Toaster — the barkeep)
+Toaster runs on **Qwen 2.5 14B** on a dedicated dual-GPU Ollama machine and behaves like a barkeep: it passively reads every text channel for context and quietly remembers the useful bits (schedules, plans, life events), but only speaks when you address it — **@mention it, reply to one of its messages, `!chat`, or DM**. It has persistent memory built from voice transcripts, chat, and game stats, and can search the web and read linked pages for current info. `!barkeep off` stops it reading a given channel.
 
 ### Voice transcription
-`!join` starts recording a voice channel. Whisper transcribes audio in rolling 5-minute chunks. When the session ends with `!leave`, an AI-generated recap is posted and memories are extracted from the transcript and saved for future conversations.
+Toaster **auto-joins a voice channel** when two or more people gather in it and starts recording (set `VOICE_AUTO_RECORD=0` to require a manual `!join`). Whisper transcribes audio in rolling 5-minute chunks, and while a session is live you can ask Toaster who's in the channel, what they're playing, and what's been said. It auto-leaves when the channel empties; memories and an AI recap are saved from the transcript.
 
 ---
 
@@ -52,12 +52,14 @@ All data is stored locally in a SQLite database (`popg.db`). Nothing is posted t
 | `!memorybuild [full]` | Admin | Backfill memories; `full` wipes and re-extracts from every transcript |
 | `!reset` | Everyone (DM) / Admin (server) | Clear chat history; `!reset all` also wipes server memories |
 
-Toaster also responds to DMs directly, and in server channels when @mentioned or when you reply to one of its messages — no `!chat` needed. It passively reads channel conversation like a barkeep, so when you address it, it already knows what everyone was just talking about. `!reset` clears a channel's conversation context.
+Toaster also responds to DMs directly, and in server channels when @mentioned or when you reply to one of its messages — no `!chat` needed. It passively reads channel conversation like a barkeep, so when you address it, it already knows what everyone was just talking about. While a voice recording is running, you can ask it about the live session — who's in the channel, what they're playing, and what's been said so far (the transcript updates in 5-minute chunks). `!reset` clears a channel's conversation context.
 
 ### Voice recording
+Recording starts automatically when people gather in voice. These override it manually:
+
 | Command | Who | Description |
 |---|---|---|
-| `!join` | Admin | Start recording the voice channel you're in |
+| `!join` | Admin | Force-start recording the voice channel you're in |
 | `!leave` | Admin | Stop recording, post recap, save memories |
 
 ### Admin
@@ -67,6 +69,8 @@ Toaster also responds to DMs directly, and in server channels when @mentioned or
 | `!admin reset @member` | Admin | Zero out a member's stats |
 | `!admin info @member` | Admin | Raw stat dump for debugging |
 | `!admin reload` | Admin | Reload all cogs without restarting |
+| `!barkeep on\|off` | Admin | Toggle whether Toaster reads the current channel |
+| `!chatlog [#channel] [n]` | Admin | Show recent archived messages from a channel |
 
 Admin commands require the `Administrator` permission or a role named `Admin`.
 
@@ -172,8 +176,9 @@ git pull && docker compose up -d --build
 | `cogs/tracking.py` | Presence and voice state events |
 | `cogs/profile.py` | `!profile` / `!stats` |
 | `cogs/leaderboard.py` | `!leaderboard`, `!weekly`, `!monthly` |
-| `cogs/admin.py` | Admin subcommands |
-| `cogs/llm.py` | AI chat, memory system, `!when`, `!recap` |
-| `cogs/voice_listener.py` | Voice recording, Whisper transcription |
+| `cogs/admin.py` | Admin subcommands, `!wipe` |
+| `cogs/utility.py` | `!help`, `!ping`, `!chatlog` |
+| `cogs/llm.py` | AI chat pipeline, barkeep absorption, memory system, web search, `!when`, `!recap` |
+| `cogs/voice_listener.py` | Voice auto-join/leave, Whisper transcription |
 
-Database: SQLite with WAL mode. Three core tables (`users`, `sessions`, `game_stats`) plus LLM tables (`memories`, `chat_messages`, `voice_sessions`, `transcript_segments`).
+Database: SQLite with WAL mode. Core tables (`users`, `sessions`, `game_stats`, partners, `activity_days`) plus AI tables (`memories`, `chat_messages`, `channel_chat_history`, `dm_history`, `voice_transcripts`, `transcript_segments`, `barkeep_optout`).

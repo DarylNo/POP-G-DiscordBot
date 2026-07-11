@@ -36,6 +36,25 @@ _DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",         "3000")) # c
 _CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS", "40"))   # more turns for shared channels (includes ambient chatter)
 _AMBIENT_MSG_MAX_CHARS = 500  # cap per absorbed channel message
 
+# Live voice-session context injected into chats while recording is active
+_VOICE_CTX_SEGMENTS  = 40    # most recent transcript lines shown
+_VOICE_CTX_MAX_CHARS = 4000  # hard cap on injected transcript text
+
+# Ambient memory: every N absorbed channel messages, extract memorable facts
+# from the batch — the barkeep remembers things said in the bar even when
+# nobody was talking to it.
+_AMBIENT_MEMORY_EVERY = int(os.getenv("AMBIENT_MEMORY_EVERY", "50"))
+
+_AMBIENT_MEMORY_SYSTEM = (
+    "Extract facts worth remembering long-term from this Discord text-chat excerpt "
+    'from "Past our Prime Gamers" (POPG). Focus on: schedules and availability '
+    "(work shifts, vacations, 'on nights next week'), plans (game sessions, meetups), "
+    "life events, strong preferences, inside jokes, purchases, and decisions. "
+    "Ignore small talk and banter with no lasting information. "
+    "Only include what is explicitly stated. "
+    "Reply with a concise bullet list. If nothing notable, reply with exactly: NONE"
+)
+
 # Write-through in-memory caches over the DB tables.
 # user_id → {"messages": list[dict], "last_active": datetime}
 _dm_sessions: dict[int, dict] = {}
@@ -132,7 +151,12 @@ _CHAT_SYSTEM = (
     "'Is there anything else I can help with?'). Just stop when you're done.\n"
     "You have stored memories from past voice sessions, chat, and game history. "
     "NEVER say you don't have access to voice chats or conversations — your memories ARE that access. "
-    "When a memory is relevant, use it to answer directly."
+    "When a memory is relevant, use it to answer directly.\n"
+    "When a [Live voice session] block is provided, you are sitting in that voice channel right now — "
+    "answer questions about who's there, what they're playing, and what they've been talking about "
+    "directly from it. The transcript updates in ~5-minute chunks, so the last few minutes may not "
+    "have landed yet. If someone asks about voice and NO live block is provided, you're not in a "
+    "voice channel right now (an admin starts one with !join)."
 )
 
 _CHARS_PER_PAGE = 1800  # Discord embed field limit safety margin
@@ -254,6 +278,29 @@ def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
     return pages or ["(empty)"]
 
 
+def _strip_message(m: dict) -> dict:
+    """Reduce a stored message to the keys Ollama accepts (drops e.g. 'ambient')."""
+    return {"role": m["role"], "content": m["content"]}
+
+
+def _trim_session(messages: list[dict], max_items: int) -> list[dict]:
+    """Trim to max_items, dropping oldest AMBIENT messages first so channel
+    banter can't flush Toaster's actual conversations out of context."""
+    if len(messages) <= max_items:
+        return messages
+    overflow = len(messages) - max_items
+    dropped = 0
+    kept: list[dict] = []
+    for m in messages:
+        if dropped < overflow and m.get("ambient"):
+            dropped += 1
+            continue
+        kept.append(m)
+    if dropped < overflow:
+        kept = kept[overflow - dropped:]
+    return kept
+
+
 def _get_dm_session(user_id: int) -> dict:
     """Return the in-memory DM session for a user, loading from DB on cache miss.
 
@@ -358,16 +405,16 @@ async def _ollama_analyse(
 
 
 _SEARCH_INTENT_SYSTEM = (
-    "You decide whether to search the web before answering. Default to SEARCH.\n"
-    "Only reply NOOP if the question is clearly timeless — pure math, basic science, "
-    "how something works conceptually, or casual chat with no factual lookup needed.\n"
-    "Always search for:\n"
+    "You decide whether to search the web before answering.\n"
+    "Reply NOOP for casual conversation: banter, jokes, opinions, questions about "
+    "server members, past gaming sessions, or anything the ongoing chat itself answers. "
+    "Most barroom chatter needs no search.\n"
+    "Reply SEARCH when external, current facts would clearly improve the answer:\n"
     "- Anything about a specific game (weapons, builds, tier lists, strategies, meta, updates, DLC, servers)\n"
     "- Prices, availability, release dates, store listings\n"
     "- Current events, news, sports scores, weather\n"
     "- Software, apps, hardware — versions, compatibility, errors, drivers\n"
-    "- Anything the user could google for a better answer than your training data\n"
-    "When in doubt, search. A search that wasn't needed costs nothing; a wrong answer does.\n"
+    "- Factual lookups where your training data may be stale or wrong\n"
     "If you should search, reply with exactly: SEARCH: <concise search query>\n"
     "If this is definitively a timeless question, reply with exactly: NOOP"
 )
@@ -407,7 +454,7 @@ async def _maybe_search(history: list[dict], user_text: str, *, intent_check: bo
 
     intent_messages = [
         {"role": "system", "content": _SEARCH_INTENT_SYSTEM},
-        *history[-4:],
+        *[_strip_message(m) for m in history[-4:]],
         {"role": "user", "content": user_text},
     ]
     try:
@@ -423,45 +470,110 @@ async def _maybe_search(history: list[dict], user_text: str, *, intent_check: bo
     return None
 
 
+# Search stack: prefer the maintained `ddgs` package (multi-engine rotation);
+# fall back to the legacy `duckduckgo_search` if that's what's installed.
+_USING_DDGS = False
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     try:
-        from duckduckgo_search.exceptions import DuckDuckGoSearchException
+        from ddgs.exceptions import DDGSException as _SearchException
     except ImportError:
-        DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
-    _DDG_AVAILABLE = True
+        _SearchException = Exception  # type: ignore[misc,assignment]
+    _SEARCH_AVAILABLE = True
+    _USING_DDGS = True
 except ImportError:
-    DDGS = None  # type: ignore[misc,assignment]
-    DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
-    _DDG_AVAILABLE = False
-    log.warning("duckduckgo_search not installed — web search disabled")
+    try:
+        from duckduckgo_search import DDGS
+        try:
+            from duckduckgo_search.exceptions import DuckDuckGoSearchException as _SearchException
+        except ImportError:
+            _SearchException = Exception  # type: ignore[misc,assignment]
+        _SEARCH_AVAILABLE = True
+    except ImportError:
+        DDGS = None  # type: ignore[misc,assignment]
+        _SearchException = Exception  # type: ignore[misc,assignment]
+        _SEARCH_AVAILABLE = False
+        log.warning("no search library installed (ddgs / duckduckgo_search) — web search disabled")
+
+# Engine ladder: each retry moves to a different provider, so one engine
+# rate-limiting doesn't kill the search. Legacy lib has no engine choice.
+_SEARCH_BACKENDS = ["auto", "duckduckgo", "bing", "brave", "google"] if _USING_DDGS else [None, None, None]
+_SEARCH_TIMEOUT = 15
+
+# Query cache — repeats (or two people asking the same thing) don't re-hit
+# rate-limited providers. Keyed on the normalized query.
+_SEARCH_CACHE: dict[str, tuple[datetime, str, str]] = {}  # key → (when, snippets, top_url)
+_SEARCH_CACHE_TTL  = 600
+_SEARCH_CACHE_MAX  = 200
+
+# Circuit breaker — after full-ladder failures, stop hammering providers for a
+# cooldown so chat stays fast and the ban (if any) can expire.
+_SEARCH_BREAKER_SECS = 300
+_search_state = {"consecutive_failures": 0, "down_until": None}
 
 
-async def _web_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
-    if not _DDG_AVAILABLE:
-        return ""
+async def _web_search(query: str, max_results: int = 5) -> tuple[str, str]:
+    """Search the web. Returns (formatted snippets, top result URL) — both empty on failure.
 
-    def _sync_search() -> list:
-        return list(DDGS(timeout=15).text(query, max_results=max_results))
+    Rock-solid path: per-attempt engine rotation, jittered backoff, result
+    cache, and a circuit breaker so a dead provider can't stall every reply.
+    """
+    import random
+
+    if not _SEARCH_AVAILABLE:
+        return "", ""
+
+    now = datetime.now(timezone.utc)
+    key = " ".join(query.lower().split())
+
+    cached = _SEARCH_CACHE.get(key)
+    if cached and (now - cached[0]).total_seconds() < _SEARCH_CACHE_TTL:
+        log.debug("search cache hit for: %s", query[:80])
+        return cached[1], cached[2]
+
+    if _search_state["down_until"] and now < _search_state["down_until"]:
+        log.debug("search circuit breaker open — skipping search")
+        return "", ""
 
     loop = asyncio.get_running_loop()
-    for attempt in range(3):
+    for attempt, backend in enumerate(_SEARCH_BACKENDS):
+        def _sync_search() -> list:
+            kwargs: dict = {"max_results": max_results}
+            if backend:
+                kwargs["backend"] = backend
+            return list(DDGS(timeout=_SEARCH_TIMEOUT).text(query, **kwargs))
+
         try:
             results = await loop.run_in_executor(None, _sync_search)
             if results:
-                formatted = "\n".join(f"• {r['title']}: {r['body']}" for r in results)
-                log.debug("DDG search returned %d results for: %s", len(results), query[:80])
-                return formatted
-            log.debug("DDG search returned 0 results (attempt %d) for: %s", attempt + 1, query[:80])
-        except DuckDuckGoSearchException as exc:
-            log.warning("DDG rate-limited (attempt %d): %s", attempt + 1, exc)
+                formatted = "\n".join(
+                    f"• {r.get('title', '')}: {r.get('body', '')}" for r in results
+                )
+                top_url = results[0].get("href", "") or results[0].get("url", "")
+                _SEARCH_CACHE[key] = (now, formatted, top_url)
+                if len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+                    oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
+                    _SEARCH_CACHE.pop(oldest, None)
+                _search_state["consecutive_failures"] = 0
+                _search_state["down_until"] = None
+                log.info("search ok via %s (%d results) for: %s",
+                         backend or "default", len(results), query[:80])
+                return formatted, top_url
+            log.debug("search returned 0 results via %s for: %s", backend or "default", query[:80])
+        except _SearchException as exc:
+            log.warning("search via %s failed (attempt %d): %s", backend or "default", attempt + 1, exc)
         except BaseException:
-            log.warning("DDG search failed (attempt %d) for: %s", attempt + 1, query[:80], exc_info=True)
-            break  # non-rate-limit errors won't improve with a retry
-        if attempt < 2:
-            await asyncio.sleep(2 ** attempt)  # 1s, 2s backoff
-    return ""
+            log.warning("search via %s failed hard (attempt %d) for: %s",
+                        backend or "default", attempt + 1, query[:80], exc_info=True)
+        if attempt < len(_SEARCH_BACKENDS) - 1:
+            await asyncio.sleep(min(2 ** attempt, 4) * random.uniform(0.5, 1.5))
+
+    _search_state["consecutive_failures"] += 1
+    if _search_state["consecutive_failures"] >= 2:
+        _search_state["down_until"] = now + timedelta(seconds=_SEARCH_BREAKER_SECS)
+        log.warning("search circuit breaker OPEN for %ds after %d full failures",
+                    _SEARCH_BREAKER_SECS, _search_state["consecutive_failures"])
+    return "", ""
 
 
 _URL_RE = re.compile(r"https?://[^\s>\"']+", re.IGNORECASE)
@@ -765,6 +877,10 @@ class LLM(commands.Cog):
         self.bot = bot
         # on_ready fires on every gateway reconnect — recovery must run once
         self._startup_recovery_done = False
+        # Channels where ambient absorption is disabled (!barkeep off)
+        self._barkeep_optout: set[int] = set(database.get_barkeep_optouts())
+        # Absorbed lines awaiting ambient memory extraction
+        self._ambient_pending: list[str] = []
         self._daily_stats_task.start()
 
     def cog_unload(self) -> None:
@@ -1115,14 +1231,36 @@ class LLM(commands.Cog):
                 session["messages"], raw_text, intent_check=not relevant_mems
             )
             if search_query:
-                snippets = await _web_search(search_query)
+                snippets, top_url = await _web_search(search_query)
                 if snippets:
-                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
+                    # Deep-fetch the top result — snippets alone are often too
+                    # thin to actually answer (patch notes, stats, guides)
+                    page_extra = ""
+                    if top_url:
+                        page_text = await _fetch_url(top_url)
+                        if page_text:
+                            page_extra = f"\n\n[Top result ({top_url}):\n{page_text[:2500]}]"
+                    call_content = (f"[Web search for '{search_query}':\n{snippets}{page_extra}]"
+                                    f"\n\n{user_content}")
                     context_tag = f"Searched: {search_query}"
+                else:
+                    # Don't silently answer from stale training data — tell the
+                    # model the search failed so it can say so
+                    call_content = (
+                        f"[NOTE: you tried to web-search '{search_query}' but the search "
+                        f"service is currently unreachable. Answer from what you know and "
+                        f"briefly mention you couldn't verify online.]\n\n{user_content}"
+                    )
+                    context_tag = "Search unavailable"
 
         system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id, relevant_mems)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
-        full_messages.extend(session["messages"])
+        full_messages.extend(_strip_message(m) for m in session["messages"])
+        # Live voice awareness — if a recording session is running, Toaster can
+        # answer questions about it (who's there, what's being said)
+        voice_ctx = self._live_voice_context()
+        if voice_ctx:
+            full_messages.append({"role": "system", "content": voice_ctx})
         # Inject relevant memories right before the question so they're impossible to miss
         if relevant_mems:
             full_messages.append({
@@ -1149,9 +1287,7 @@ class LLM(commands.Cog):
         session["messages"].append({"role": "user",      "content": user_content})
         session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
-        max_items = max_turns * 2
-        if len(session["messages"]) > max_items:
-            session["messages"] = session["messages"][-max_items:]
+        session["messages"] = _trim_session(session["messages"], max_turns * 2)
         persist(session["messages"])
 
         # Timing subtext: LLM generation time, plus the total when context
@@ -1214,20 +1350,108 @@ class LLM(commands.Cog):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"Slow down a sec — try again in {error.retry_after:.0f}s.")
 
+    def _live_voice_context(self) -> str | None:
+        """Snapshot of the active voice recording session, or None if not recording.
+
+        Injected into every chat so Toaster can answer questions about the
+        ongoing voice channel: who's in it, what they're playing, and what
+        they've been saying (transcribed so far).
+        """
+        vl = self.bot.cogs.get("VoiceListener")
+        if vl is None:
+            return None
+        entry = getattr(vl, "_active", {}).get(config.GUILD_ID)
+        if entry is None or entry.get("is_final"):
+            return None
+
+        import time as _time
+        from cogs.voice_listener import _get_game_label
+
+        elapsed = _time.monotonic() - entry["session_start"]
+        channel = entry["vc"].channel
+        channel_name = channel.name if channel else "unknown"
+        parts = [f"[Live voice session] Recording '{channel_name}' — "
+                 f"{_fmt_timestamp(elapsed)} in (session #{entry['session_id']})."]
+
+        if channel:
+            member_bits = []
+            for m in channel.members:
+                if m.bot:
+                    continue
+                label = _get_game_label(m)
+                member_bits.append(
+                    f"{m.display_name} ({'idle/chatting' if label == 'idle' else 'playing ' + label})"
+                )
+            if member_bits:
+                parts.append("In the channel: " + ", ".join(member_bits))
+
+        segments = database.get_transcript_segments(entry["session_id"])
+        if segments:
+            recent = segments[-_VOICE_CTX_SEGMENTS:]
+            text = _build_transcript_text(recent)
+            if len(text) > _VOICE_CTX_MAX_CHARS:
+                text = text[-_VOICE_CTX_MAX_CHARS:]
+            parts.append("Voice transcript so far (most recent lines):\n" + text)
+        else:
+            parts.append("No speech transcribed yet (first chunk still in progress).")
+
+        return "\n".join(parts)
+
     def _absorb_channel_message(self, message: discord.Message) -> None:
-        """Store a channel message in the chat session as passive context (no reply)."""
+        """Store a channel message as passive context (no reply).
+
+        Also archives it permanently to chat_messages and batches it for
+        ambient memory extraction — the barkeep remembers things said in the
+        bar even when nobody was addressing it.
+        """
+        if message.channel.id in self._barkeep_optout:
+            return
         text = message.content.strip()
         if not text:
             return
+        line = f"{message.author.display_name}: {text[:_AMBIENT_MSG_MAX_CHARS]}"
+
         session = _get_ch_session(message.channel.id)
-        session["messages"].append({
-            "role": "user",
-            "content": f"{message.author.display_name}: {text[:_AMBIENT_MSG_MAX_CHARS]}",
-        })
-        max_items = _CH_MAX_HISTORY_TURNS * 2
-        if len(session["messages"]) > max_items:
-            session["messages"] = session["messages"][-max_items:]
+        session["messages"].append({"role": "user", "content": line, "ambient": True})
+        session["messages"] = _trim_session(session["messages"], _CH_MAX_HISTORY_TURNS * 2)
         database.save_channel_chat_history(message.channel.id, session["messages"])
+
+        # Permanent archive (replaces the old !log watch system)
+        database.log_message(
+            message_id=message.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            username=str(message.author),
+            content=message.content,
+            sent_at=message.created_at.replace(tzinfo=timezone.utc).isoformat(),
+        )
+
+        # Batch for ambient memory extraction
+        self._ambient_pending.append(line)
+        if len(self._ambient_pending) >= _AMBIENT_MEMORY_EVERY:
+            batch, self._ambient_pending = self._ambient_pending, []
+            _spawn(self._extract_ambient_memories(batch))
+
+    async def _extract_ambient_memories(self, lines: list[str]) -> None:
+        """Extract memorable facts from a batch of absorbed channel chatter."""
+        try:
+            result = await asyncio.wait_for(
+                _ollama_analyse(messages=[
+                    {"role": "system", "content": _AMBIENT_MEMORY_SYSTEM},
+                    {"role": "user", "content": "\n".join(lines)},
+                ]),
+                timeout=_MEMORY_EXTRACT_TIMEOUT,
+            )
+        except Exception:
+            log.warning("Ambient memory extraction failed — batch dropped")
+            return
+        if not result or result.strip().upper() == "NONE":
+            return
+        facts = [l.lstrip("•-* 0123456789.)").strip() for l in result.splitlines()]
+        facts = [f for f in facts if f and f.upper() != "NONE"]
+        if facts:
+            await _merge_memories("guild", config.GUILD_ID, facts)
+            log.info("Ambient memory: stored %d fact(s) from %d chat lines", len(facts), len(lines))
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -1396,6 +1620,29 @@ class LLM(commands.Cog):
         database.save_memories(scope_type, scope_id, backup)
         await ctx.send(f"Restored {len(backup)} memories from the pre-consolidation backup "
                        f"(replaced {current}).")
+
+    @commands.guild_only()
+    @commands.command(name="barkeep")
+    async def barkeep(self, ctx: commands.Context, mode: str = None) -> None:
+        """Admin: `!barkeep off` stops Toaster reading this channel; `!barkeep on` resumes."""
+        from cogs.admin import _is_admin
+        if not _is_admin(ctx):
+            await ctx.send("Admin only.")
+            return
+        if mode is None or mode.lower() not in ("on", "off"):
+            state = "OFF" if ctx.channel.id in self._barkeep_optout else "ON"
+            await ctx.send(f"Barkeep listening in this channel is **{state}**. "
+                           f"Use `!barkeep on` / `!barkeep off` to change it.")
+            return
+        if mode.lower() == "off":
+            self._barkeep_optout.add(ctx.channel.id)
+            database.add_barkeep_optout(ctx.channel.id)
+            await ctx.send("Toaster is no longer reading this channel. "
+                           "(@mentions still work; `!barkeep on` to resume.)")
+        else:
+            self._barkeep_optout.discard(ctx.channel.id)
+            database.remove_barkeep_optout(ctx.channel.id)
+            await ctx.send("Toaster is reading this channel again.")
 
     @commands.command(name="reset")
     async def reset_dm(self, ctx: commands.Context, scope: str = None) -> None:

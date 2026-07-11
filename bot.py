@@ -34,7 +34,6 @@ COGS = [
     "cogs.profile",
     "cogs.leaderboard",
     "cogs.admin",
-    "cogs.chat_logger",
     "cogs.utility",
     "cogs.voice_listener",
     "cogs.llm",

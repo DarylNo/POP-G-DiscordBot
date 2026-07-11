@@ -26,15 +26,14 @@ _USER_COMMANDS_TOP = """
 _WHEN_LINE = "`!when [@member]` — AI prediction of when they'll next be online"
 
 _USER_COMMANDS_BOTTOM = """
-**Ask the AI**
-`!chat <message>` — Chat with Toaster (alias `!ask`)
-**@Toaster** or reply to one of my messages — I read the channel like a barkeep, so I already have the context
+**Talking to Toaster**
+Just **@Toaster** or reply to one of my messages — I read the channel like a barkeep, so I already have the context.
+I join voice automatically when people gather — ask me who's in there, what they're playing, what's been said.
+DM me directly (no `!` prefix) for a private conversation I'll remember.
+`!chat <message>` — Prefix-style chat if you prefer it (alias `!ask`)
 `!memories [page]` — See what Toaster remembers
 `!reset` — DM: clear your history · Server (admin): clear this channel's chat history
 `!reset all` — (admin) also wipe Toaster's server-wide memories
-
-**DM Conversations**
-Message me directly (no `!` prefix) for a continuous chat — I'll remember the conversation.
 
 **Voice Recap**
 `!recap [id]` — AI summary of last (or specific) voice session
@@ -72,13 +71,8 @@ ADMIN_COMMANDS = """
 `!admin info @member` — Raw stat dump
 `!admin reset @member` — Zero out a member's stats
 `!admin reload <cog>` — Reload a cog without restarting
-`!log all` — Log every channel the bot can see
-`!log none` — Stop watch-all mode
-`!log watch <#channel|id>` — Start logging a channel
-`!log unwatch <#channel|id>` — Stop logging a channel
-`!log list` — Show watched channels
-`!log tail <#channel|id> [n]` — Show recent logged messages
-(DM the bot these commands with a channel ID to manage logging privately.)
+`!barkeep on|off` — Toggle Toaster reading this channel
+`!chatlog [#channel|id] [n]` — Show recent archived messages
 """.strip()
 
 
@@ -91,6 +85,45 @@ class Utility(commands.Cog):
         """Check if the bot is alive and show its latency."""
         latency_ms = round(self.bot.latency * 1000)
         await ctx.send(f"Pong! `{latency_ms}ms` — v{config.VERSION}")
+
+    @commands.command(name="chatlog")
+    async def chatlog(self, ctx: commands.Context, channel_ref: str = None, limit: int = 10) -> None:
+        """Admin: show the last N archived messages from a channel (default: current, 10)."""
+        if not _is_admin(ctx):
+            await ctx.send("You need Administrator permission to use this.")
+            return
+        channel = None
+        if channel_ref is None:
+            if ctx.guild is not None:
+                channel = ctx.channel
+        else:
+            ref = channel_ref.strip()
+            channel_id = None
+            if ref.startswith("<#") and ref.endswith(">") and ref[2:-1].isdigit():
+                channel_id = int(ref[2:-1])
+            elif ref.isdigit():
+                channel_id = int(ref)
+            if channel_id is not None:
+                channel = self.bot.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send("Could not find that channel. Use a #mention or numeric channel ID.")
+            return
+
+        limit = max(1, min(limit, 25))
+        messages = database.get_recent_messages(channel.id, limit=limit)
+        if not messages:
+            await ctx.send(f"No archived messages for {channel.mention} yet.")
+            return
+        lines = []
+        for m in messages:
+            content = m["content"][:80] + ("…" if len(m["content"]) > 80 else "")
+            lines.append(f"**{m['username']}**: {content}")
+        embed = discord.Embed(
+            title=f"Last {len(messages)} messages — #{channel.name}",
+            description="\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed)
 
     @commands.command(name="help", aliases=["commands"])
     async def help(self, ctx: commands.Context) -> None:

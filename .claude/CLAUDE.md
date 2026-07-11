@@ -6,9 +6,9 @@ This file is the AI workspace entry point. It gives Claude full context about th
 
 ## Project Overview
 
-**POPG** (Past our Prime Gamers) Discord bot. Python 3.10+ / discord.py 2.x / SQLite.
+**POPG** (Past our Prime Gamers) Discord bot. Python 3.11 / py-cord 2.x / SQLite / Ollama (qwen2.5:14b) / Whisper.
 
-Tracks member presence (online, gaming, voice) silently and exposes stats via `!` prefix commands. No messages are posted to channels automatically.
+**Direction: barkeep bot.** Toaster hangs out in the server like a barkeep — it passively reads every text channel (ambient context + permanent archive + periodic memory extraction), auto-joins voice channels when friends gather and transcribes them, but **only speaks when addressed** (@mention, reply to its message, `!chat`, or DM). Stats commands (`!profile`, `!leaderboard`) remain from the original tracker heritage. It never posts unprompted (standing design decision — revisit only if the user asks).
 
 **Branch:** `claude/discord-popg-chatbot-REQLv`  
 **Database file:** `popg.db` (auto-created, git-ignored)  
@@ -19,31 +19,44 @@ Tracks member presence (online, gaming, voice) silently and exposes stats via `!
 ## File Map
 
 ```
-bot.py              Entry point. Loads cogs, starts bot.
-config.py           Reads .env → BOT_TOKEN, PREFIX, GUILD_ID
+bot.py              Entry point. Loads cogs, startup diagnostics, error handling.
+config.py           Reads .env → BOT_TOKEN, PREFIX, GUILD_ID. VERSION constant.
 database.py         All SQLite operations. The only file that touches the DB.
 cogs/
-  tracking.py       on_presence_update, on_voice_state_update, on_ready recovery
-  profile.py        !profile / !stats commands
-  leaderboard.py    !leaderboard command
-  admin.py          !admin subcommands (reset, info, sessions)
+  tracking.py       Presence/game/voice session tracking; reconnect-safe on_ready recovery
+  profile.py        !profile / !stats + shared helpers (_fmt_duration, _resolve_target)
+  leaderboard.py    !leaderboard / !weekly / !monthly (period + per-game)
+  admin.py          !admin subcommands, !wipe, _is_admin helper
+  utility.py        !help, !ping, !chatlog
+  voice_listener.py Voice recording: auto-join/leave, TimestampedSink, Whisper, chunk rotation
+  llm.py            All AI: chat pipeline, barkeep absorption, memory system, web search,
+                    !recap/!transcript/!when/!memories/!forget/!barkeep
 .claude/
   CLAUDE.md         ← you are here
-  architecture.md   Schema, data-flow diagrams, design decisions
-  roadmap.md        Phase 2 LLM integration plan
+  architecture.md   Schema, data-flow diagrams, design decisions (may lag reality)
+  roadmap.md        Original Phase 2 plan (largely implemented)
 ```
+
+---
+
+## The Barkeep Model (core behavior)
+
+- **Text:** `llm.py on_message` absorbs every non-command guild message into that channel's rolling chat session (`ambient: True` flag, 500 chars each, trimmed ambient-first at 40 turns), archives it to `chat_messages`, and every ~50 absorbed lines runs ambient memory extraction. Replies ONLY when @mentioned / replied to / `!chat` / DM. `!barkeep off` disables absorption per channel (mentions still work).
+- **Voice:** `voice_listener.py` auto-joins a channel when ≥2 humans are in it (`VOICE_AUTO_RECORD=0` disables), transcribes in rolling 5-min chunks, records join/leave/game-change `[Session]` markers, auto-leaves when the channel empties. Live session context (who's there, what's playing, transcript so far) is injected into every chat while recording.
 
 ---
 
 ## Key Conventions
 
-- **All DB access goes through `database.py`.** Cogs import from it; they never use sqlite3 directly.
-- **`database.get_conn()`** returns a thread-local connection with WAL mode and foreign keys on.
-- **Session lifecycle:** `open_session()` is idempotent (checks for existing open session). `close_session()` sets `ended_at`, computes elapsed seconds, updates `users` aggregate totals, and updates `game_stats` for gaming sessions.
-- **No direct `discord.Member` objects in `database.py`** — pass primitives (user_id, username, display_name).
-- **Embed formatting helpers** live in `cogs/profile.py` (`_fmt_duration`, `_fmt_dt`) and are imported by `cogs/leaderboard.py` and `cogs/admin.py`.
-- **Admin check** is a plain function `_is_admin(ctx)` in `cogs/admin.py` — checks `Administrator` permission or role named `Admin`.
-- `discord.Game` and `discord.Activity(type=playing)` both count as gaming. The helper `_get_game(member)` in `cogs/tracking.py` handles both cases.
+- **All DB access goes through `database.py`.** Cogs never use sqlite3 directly. No `discord.Member` objects in database.py — primitives only. `get_conn()` = thread-local WAL connection, FKs on.
+- **One chat pipeline:** `LLM._run_chat` serves `!chat`, DMs, and mentions. Context order: system+memory block → history (stripped via `_strip_message` to drop internal keys) → live voice block → relevant memories → user message.
+- **Memory system:** facts extracted per engaged exchange, per voice chunk, and per ambient batch → `_merge_memories` (write-locked, exact-dedup, LLM consolidation at 150 entries with backup scope + sanity check). `!memories` / `!forget` / `!memoryrestore` / `!memorybuild [full]` manage it.
+- **Web search:** `ddgs` with engine rotation (ddg→bing→brave→google), 10-min cache, circuit breaker, top-result deep-fetch, honest failure injection. Force-pattern regex for obvious lookups; LLM intent check (NOOP-biased for banter) otherwise.
+- **Session lifecycle (tracking):** `close_session(cap_seconds=...)` clamps stored `ended_at`; stale closes still credit streaks/partners. on_ready reconciles instead of close-all on reconnects (`_recovered_once`).
+- **Voice timestamps:** `TimestampedSink` records gap anchors per user; `wall_offset()` maps speech-only audio positions to wall clock. Recording restarts BEFORE transcription on rotation (no audio loss).
+- **Background tasks** go through `_spawn` (llm.py module-level / VoiceListener method) so they aren't GC'd.
+- **Ollama:** `_ollama_generate` for chat (16k ctx), `_ollama_analyse` for analysis (unlimited ctx, serialized behind `_analysis_lock`). URL/model hardcoded at top of llm.py.
+- **Embed helpers** in `cogs/profile.py`; admin check `_is_admin(ctx)` in `cogs/admin.py`. `discord.Game` and `Activity(type=playing)` both count as gaming — `_get_game`/`_get_game_label`.
 
 ---
 
@@ -52,7 +65,7 @@ cogs/
 ```python
 intents.members = True        # Member join/leave, profile data
 intents.presences = True      # Online status + game activity
-intents.message_content = True # Prefix commands
+intents.message_content = True # Reading channel messages (barkeep) + prefix commands
 ```
 
 These must also be enabled in the Discord Developer Portal under the bot application.
@@ -63,14 +76,19 @@ These must also be enabled in the Discord Developer Portal under the bot applica
 
 ```sql
 users        (user_id PK, username, display_name, first_seen, last_seen,
-              total_online_seconds, total_gaming_seconds, total_voice_seconds)
-
+              total_online/gaming/voice/desktop/mobile_seconds)
 sessions     (id PK, user_id FK, session_type CHECK('online','gaming','voice'),
-              game_name, voice_channel_id, started_at, ended_at)
-              -- ended_at IS NULL means currently active
-
-game_stats   (id PK, user_id FK, game_name, total_seconds, session_count,
-              last_played, UNIQUE(user_id, game_name))
+              game_name, voice_channel_id, platform, started_at, ended_at)  -- NULL = live
+game_stats   (id PK, user_id FK, game_name, total_seconds, session_count, last_played,
+              UNIQUE(user_id, game_name))
+game_partners / voice_partners   (shared_seconds overlap, credited at later close)
+activity_days (user_id, date UNIQUE)          -- streaks; recorded at open AND close
+chat_messages (message_id UNIQUE, channel_id, user_id, username, content, sent_at)  -- barkeep archive
+channel_chat_history / dm_history (JSON message lists, write-through cached in llm.py)
+memories     (scope_type 'guild'|'dm'|'*_backup', scope_id, content JSON list)
+voice_transcripts (id PK, channel_id/name, started/ended_at, status, summary, memory_extracted)
+transcript_segments (session_id FK, user_id, display_name, timestamp REAL, text)
+barkeep_optout (channel_id PK)
 ```
 
 ---
@@ -101,25 +119,25 @@ When modifying commands:
 
 ---
 
-## Phase 2 Hook Points (do not break these)
+## Testing
 
-- `database.get_user_stats(user_id)` returns a plain dict — ready to serialize into an LLM prompt
-- `database.get_leaderboard(category)` returns a list of plain dicts
-- `database.get_all_users()` returns all user rows — usable for bulk LLM context
-- A future `cogs/llm.py` will call Ollama's HTTP API (`http://localhost:11434`)
-- A future `cogs/voice_listener.py` will use discord.py's `WaveSink` → Whisper
-
-See `.claude/roadmap.md` for the full Phase 2 plan.
+Functional suite lives in the Claude session scratchpad (`test_functional.py`) — exercises database + llm + voice logic on a scratch DB with mocked Ollama/DDGS (60+ checks). Recreate/extend it when changing logic. Always `python3 -m py_compile` everything and import-check all cogs before pushing. When modifying voice: verify chunk rotation restarts recording BEFORE transcription, `!leave` during rotation, auto-join/auto-leave, external disconnect (watchdog in `_chunk_rotator`).
 
 ---
 
 ## Environment Variables
 
-| Variable | Required | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `BOT_TOKEN` | Yes | Discord bot token |
-| `PREFIX` | No (default `!`) | Command prefix |
-| `GUILD_ID` | Yes | Discord server snowflake ID |
+| `BOT_TOKEN` | (required) | Discord bot token |
+| `GUILD_ID` | (required) | Server snowflake |
+| `PREFIX` | `!` | Command prefix |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` | `small` / `cpu` | Whisper config |
+| `VOICE_CHUNK_SECS` | `300` | Transcription chunk length |
+| `VOICE_AUTO_RECORD` | `1` | Barkeep auto-join voice |
+| `VOICE_AUTO_MIN_MEMBERS` | `2` | Humans needed to auto-join |
+| `AMBIENT_MEMORY_EVERY` | `50` | Absorbed lines per ambient memory extraction |
+| `CHAT_MAX_HISTORY_TURNS` | `40` | Channel context depth |
 
 ---
 
