@@ -183,9 +183,21 @@ class Tracking(commands.Cog):
             if game_before:
                 elapsed = database.close_session(after.id, "gaming")
                 log.debug("%s stopped playing %s (%ss)", after.display_name, game_before, elapsed)
+                self._check_milestones(after.id)
             if game_after:
                 database.open_session(after.id, "gaming", game_name=game_after)
                 log.debug("%s started playing %s", after.display_name, game_after)
+
+    def _check_milestones(self, user_id: int) -> None:
+        """Detect newly-crossed streak/playtime milestones and hand them to the
+        LLM cog to (maybe) announce. Silent if nothing new or auto-posts muted."""
+        try:
+            events = database.check_and_record_milestones(user_id)
+        except Exception:
+            log.exception("Milestone check failed for %d", user_id)
+            return
+        if events:
+            self.bot.dispatch("popg_milestone", events)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -207,6 +219,7 @@ class Tracking(commands.Cog):
         elif was_in_voice and not now_in_voice:
             elapsed = database.close_session(member.id, "voice")
             log.debug("%s left voice (%ss)", member.display_name, elapsed)
+            self._check_milestones(member.id)
         elif was_in_voice and now_in_voice and before.channel.id != after.channel.id:
             # Moved between channels — close old, open new
             database.close_session(member.id, "voice")

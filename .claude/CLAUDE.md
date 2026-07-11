@@ -8,7 +8,7 @@ This file is the AI workspace entry point. It gives Claude full context about th
 
 **POPG** (Past our Prime Gamers) Discord bot. Python 3.11 / py-cord 2.x / SQLite / Ollama (qwen2.5:14b) / Whisper.
 
-**Direction: barkeep bot.** Toaster hangs out in the server like a barkeep — it passively reads every text channel (ambient context + permanent archive + periodic memory extraction), auto-joins voice channels when friends gather and transcribes them, but **only speaks when addressed** (@mention, reply to its message, `!chat`, or DM). Stats commands (`!profile`, `!leaderboard`) remain from the original tracker heritage. It never posts unprompted (standing design decision — revisit only if the user asks).
+**Direction: barkeep bot.** Toaster hangs out in the server like a barkeep — it passively reads every text channel (ambient context + permanent archive + periodic memory extraction), auto-joins voice channels when friends gather and transcribes them, but **only speaks when addressed** (@mention, reply to its message, `!chat`, or DM). Stats commands (`!profile`, `!leaderboard`) remain from the original tracker heritage. As of v1.14 it also speaks unprompted in three rate-limited ways (voice greeting, milestone reactions, ambient chime-in) — all governed and mutable via `!barkeep quiet`.
 
 **Branch:** `claude/discord-popg-chatbot-REQLv`  
 **Database file:** `popg.db` (auto-created, git-ignored)  
@@ -43,6 +43,7 @@ cogs/
 
 - **Text:** `llm.py on_message` absorbs every non-command guild message into that channel's rolling chat session (`ambient: True` flag, 500 chars each, trimmed ambient-first at 40 turns), archives it to `chat_messages`, and every ~50 absorbed lines runs ambient memory extraction. Replies ONLY when @mentioned / replied to / `!chat` / DM. `!barkeep off` disables absorption per channel (mentions still work).
 - **Voice:** `voice_listener.py` auto-joins a channel when ≥2 humans are in it (`VOICE_AUTO_RECORD=0` disables), transcribes in rolling 5-min chunks, records join/leave/game-change `[Session]` markers, auto-leaves when the channel empties. Live session context (who's there, what's playing, transcript so far) is injected into every chat while recording.
+- **Auto-posts (unprompted, v1.14):** three behaviors — voice greeting (on auto-join, dispatched `popg_voice_joined`), milestone reactions (streaks/playtime; detected in tracking via `database.check_and_record_milestones`, dispatched `popg_milestone`, dedup'd in `announced_milestones`), and ambient chime-in (`_maybe_chime_in`, NOOP-biased LLM call every `CHIME_CONSIDER_EVERY` absorbed msgs; **off by default**, gated on `chime_enabled` flag / `!barkeep chime on`). ALL pass through one governor in `llm.py` (`_can_auto_post`/`_auto_post`): `AUTO_POST_MIN_GAP` between any two posts + per-behavior cooldowns + persisted quiet flag (`!barkeep quiet`/`speak`, `kv_store` key `auto_post_quiet`). Posts go to `ANNOUNCE_CHANNEL_ID` (else guild system channel); chime-ins post in-place. Keep it rare — the failure mode is an annoying bot.
 
 ---
 
@@ -138,6 +139,11 @@ Functional suite lives in the Claude session scratchpad (`test_functional.py`) �
 | `VOICE_AUTO_MIN_MEMBERS` | `2` | Humans needed to auto-join |
 | `AMBIENT_MEMORY_EVERY` | `50` | Absorbed lines per ambient memory extraction |
 | `CHAT_MAX_HISTORY_TURNS` | `40` | Channel context depth |
+| `ANNOUNCE_CHANNEL_ID` | `0` | Channel for greetings/milestones (0 = guild system channel) |
+| `AUTO_POST_MIN_GAP` | `600` | Seconds between ANY two auto-posts |
+| `CHIME_COOLDOWN` | `2700` | Seconds between ambient chime-ins |
+| `CHIME_CONSIDER_EVERY` | `20` | Absorbed msgs between chime considerations |
+| `GREETING_COOLDOWN` | `1800` | Seconds between voice greetings |
 
 ---
 

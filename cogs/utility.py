@@ -72,6 +72,8 @@ ADMIN_COMMANDS = """
 `!admin reset @member` — Zero out a member's stats
 `!admin reload <cog>` — Reload a cog without restarting
 `!barkeep on|off` — Toggle Toaster reading this channel
+`!barkeep quiet|speak` — Mute / unmute unprompted auto-posts (server-wide)
+`!barkeep chime on|off` — Toggle ambient chime-in (off by default)
 `!chatlog [#channel|id] [n]` — Show recent archived messages
 """.strip()
 
