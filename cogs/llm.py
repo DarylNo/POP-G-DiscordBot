@@ -905,6 +905,9 @@ class LLM(commands.Cog):
         self._ambient_pending: list[str] = []
         # Auto-post governor state
         self._quiet = database.get_flag("auto_post_quiet", "0") == "1"
+        # Ambient chime-in is OFF by default (most intrusive behavior) —
+        # greetings and milestones stay on. Enable with !barkeep chime on.
+        self._chime_enabled = database.get_flag("chime_enabled", "0") == "1"
         self._last_auto_post: datetime | None = None
         self._last_chime: datetime | None = None
         self._last_greeting: datetime | None = None
@@ -1561,13 +1564,14 @@ class LLM(commands.Cog):
             batch, self._ambient_pending = self._ambient_pending, []
             _spawn(self._extract_ambient_memories(batch))
 
-        # Occasionally consider chiming in (heavily rate-limited by the governor)
-        cid = message.channel.id
-        self._chime_counter[cid] = self._chime_counter.get(cid, 0) + 1
-        if self._chime_counter[cid] >= CHIME_CONSIDER_EVERY:
-            self._chime_counter[cid] = 0
-            if self._can_auto_post("chime"):
-                _spawn(self._maybe_chime_in(message.channel, session))
+        # Occasionally consider chiming in (off by default; rate-limited when on)
+        if self._chime_enabled:
+            cid = message.channel.id
+            self._chime_counter[cid] = self._chime_counter.get(cid, 0) + 1
+            if self._chime_counter[cid] >= CHIME_CONSIDER_EVERY:
+                self._chime_counter[cid] = 0
+                if self._can_auto_post("chime"):
+                    _spawn(self._maybe_chime_in(message.channel, session))
 
     async def _extract_ambient_memories(self, lines: list[str]) -> None:
         """Extract memorable facts from a batch of absorbed channel chatter."""
@@ -1762,8 +1766,9 @@ class LLM(commands.Cog):
     @commands.command(name="barkeep")
     async def barkeep(self, ctx: commands.Context, mode: str = None) -> None:
         """Admin barkeep controls:
-          `!barkeep on|off`     — toggle reading THIS channel
+          `!barkeep on|off`      — toggle reading THIS channel
           `!barkeep quiet|speak` — mute / unmute all unprompted auto-posts (server-wide)
+          `!barkeep chime on|off` — toggle ambient chime-in (off by default)
         """
         from cogs.admin import _is_admin
         if not _is_admin(ctx):
@@ -1771,6 +1776,20 @@ class LLM(commands.Cog):
             return
 
         m = (mode or "").lower()
+
+        # Ambient chime-in toggle (off by default)
+        if m == "chime":
+            arg = (ctx.message.content.split()[2:] or [""])[0].lower()
+            if arg not in ("on", "off"):
+                state = "ON" if self._chime_enabled else "OFF"
+                await ctx.send(f"Ambient chime-in is **{state}**. `!barkeep chime on|off` to change.")
+                return
+            self._chime_enabled = (arg == "on")
+            database.set_flag("chime_enabled", "1" if self._chime_enabled else "0")
+            await ctx.send("Ambient chime-in **on** — I'll occasionally drop a line into the chat."
+                           if self._chime_enabled else
+                           "Ambient chime-in **off** — I'll only greet voice and mark milestones.")
+            return
 
         # Global auto-post mute
         if m in ("quiet", "speak", "loud"):
@@ -1787,9 +1806,11 @@ class LLM(commands.Cog):
         if m not in ("on", "off"):
             read = "OFF" if ctx.channel.id in self._barkeep_optout else "ON"
             posts = "MUTED" if self._quiet else "ON"
+            chime = "ON" if self._chime_enabled else "OFF"
             await ctx.send(
-                f"Reading this channel: **{read}** · Auto-posts (server-wide): **{posts}**\n"
-                f"`!barkeep on|off` toggles reading here; `!barkeep quiet|speak` toggles auto-posts."
+                f"Reading this channel: **{read}** · Auto-posts: **{posts}** · Chime-in: **{chime}**\n"
+                f"`!barkeep on|off` (read here) · `!barkeep quiet|speak` (auto-posts) · "
+                f"`!barkeep chime on|off` (ambient chime-in)."
             )
             return
         if m == "off":

@@ -22,7 +22,7 @@ All data is stored locally in a SQLite database (`popg.db`).
 ### AI assistant (Toaster — the barkeep)
 Toaster runs on **Qwen 2.5 14B** on a dedicated dual-GPU Ollama machine and behaves like a barkeep: it passively reads every text channel for context and quietly remembers the useful bits (schedules, plans, life events), but only speaks when you address it — **@mention it, reply to one of its messages, `!chat`, or DM**. It has persistent memory built from voice transcripts, chat, and game stats, and can search the web and read linked pages for current info. `!barkeep off` stops it reading a given channel.
 
-Like a real barkeep, it occasionally speaks up on its own — greeting a voice channel when it joins, marking a milestone (a long streak, a playtime landmark), or dropping the odd one-liner into chat. This is heavily rate-limited so it stays a welcome surprise, not noise; `!barkeep quiet` mutes all of it server-wide.
+Like a real barkeep, it occasionally speaks up on its own — greeting a voice channel when it joins and marking milestones (a long streak, a playtime landmark). It can also drop the odd one-liner into chat, but that **ambient chime-in is off by default** (enable with `!barkeep chime on`). All auto-posts are heavily rate-limited so they stay a welcome surprise, not noise; `!barkeep quiet` mutes everything server-wide.
 
 ### Voice transcription
 Toaster **auto-joins a voice channel** when two or more people gather in it and starts recording (set `VOICE_AUTO_RECORD=0` to require a manual `!join`). Whisper transcribes audio in rolling 5-minute chunks, and while a session is live you can ask Toaster who's in the channel, what they're playing, and what's been said. It auto-leaves when the channel empties; memories and an AI recap are saved from the transcript.
@@ -73,6 +73,7 @@ Recording starts automatically when people gather in voice. These override it ma
 | `!admin reload` | Admin | Reload all cogs without restarting |
 | `!barkeep on\|off` | Admin | Toggle whether Toaster reads the current channel |
 | `!barkeep quiet\|speak` | Admin | Mute / unmute unprompted auto-posts (server-wide) |
+| `!barkeep chime on\|off` | Admin | Toggle ambient chime-in (off by default) |
 | `!chatlog [#channel] [n]` | Admin | Show recent archived messages from a channel |
 
 Admin commands require the `Administrator` permission or a role named `Admin`.
