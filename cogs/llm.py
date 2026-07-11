@@ -432,45 +432,110 @@ async def _maybe_search(history: list[dict], user_text: str, *, intent_check: bo
     return None
 
 
+# Search stack: prefer the maintained `ddgs` package (multi-engine rotation);
+# fall back to the legacy `duckduckgo_search` if that's what's installed.
+_USING_DDGS = False
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     try:
-        from duckduckgo_search.exceptions import DuckDuckGoSearchException
+        from ddgs.exceptions import DDGSException as _SearchException
     except ImportError:
-        DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
-    _DDG_AVAILABLE = True
+        _SearchException = Exception  # type: ignore[misc,assignment]
+    _SEARCH_AVAILABLE = True
+    _USING_DDGS = True
 except ImportError:
-    DDGS = None  # type: ignore[misc,assignment]
-    DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
-    _DDG_AVAILABLE = False
-    log.warning("duckduckgo_search not installed — web search disabled")
+    try:
+        from duckduckgo_search import DDGS
+        try:
+            from duckduckgo_search.exceptions import DuckDuckGoSearchException as _SearchException
+        except ImportError:
+            _SearchException = Exception  # type: ignore[misc,assignment]
+        _SEARCH_AVAILABLE = True
+    except ImportError:
+        DDGS = None  # type: ignore[misc,assignment]
+        _SearchException = Exception  # type: ignore[misc,assignment]
+        _SEARCH_AVAILABLE = False
+        log.warning("no search library installed (ddgs / duckduckgo_search) — web search disabled")
+
+# Engine ladder: each retry moves to a different provider, so one engine
+# rate-limiting doesn't kill the search. Legacy lib has no engine choice.
+_SEARCH_BACKENDS = ["auto", "duckduckgo", "bing", "brave", "google"] if _USING_DDGS else [None, None, None]
+_SEARCH_TIMEOUT = 15
+
+# Query cache — repeats (or two people asking the same thing) don't re-hit
+# rate-limited providers. Keyed on the normalized query.
+_SEARCH_CACHE: dict[str, tuple[datetime, str, str]] = {}  # key → (when, snippets, top_url)
+_SEARCH_CACHE_TTL  = 600
+_SEARCH_CACHE_MAX  = 200
+
+# Circuit breaker — after full-ladder failures, stop hammering providers for a
+# cooldown so chat stays fast and the ban (if any) can expire.
+_SEARCH_BREAKER_SECS = 300
+_search_state = {"consecutive_failures": 0, "down_until": None}
 
 
-async def _web_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
-    if not _DDG_AVAILABLE:
-        return ""
+async def _web_search(query: str, max_results: int = 5) -> tuple[str, str]:
+    """Search the web. Returns (formatted snippets, top result URL) — both empty on failure.
 
-    def _sync_search() -> list:
-        return list(DDGS(timeout=15).text(query, max_results=max_results))
+    Rock-solid path: per-attempt engine rotation, jittered backoff, result
+    cache, and a circuit breaker so a dead provider can't stall every reply.
+    """
+    import random
+
+    if not _SEARCH_AVAILABLE:
+        return "", ""
+
+    now = datetime.now(timezone.utc)
+    key = " ".join(query.lower().split())
+
+    cached = _SEARCH_CACHE.get(key)
+    if cached and (now - cached[0]).total_seconds() < _SEARCH_CACHE_TTL:
+        log.debug("search cache hit for: %s", query[:80])
+        return cached[1], cached[2]
+
+    if _search_state["down_until"] and now < _search_state["down_until"]:
+        log.debug("search circuit breaker open — skipping search")
+        return "", ""
 
     loop = asyncio.get_running_loop()
-    for attempt in range(3):
+    for attempt, backend in enumerate(_SEARCH_BACKENDS):
+        def _sync_search() -> list:
+            kwargs: dict = {"max_results": max_results}
+            if backend:
+                kwargs["backend"] = backend
+            return list(DDGS(timeout=_SEARCH_TIMEOUT).text(query, **kwargs))
+
         try:
             results = await loop.run_in_executor(None, _sync_search)
             if results:
-                formatted = "\n".join(f"• {r['title']}: {r['body']}" for r in results)
-                log.debug("DDG search returned %d results for: %s", len(results), query[:80])
-                return formatted
-            log.debug("DDG search returned 0 results (attempt %d) for: %s", attempt + 1, query[:80])
-        except DuckDuckGoSearchException as exc:
-            log.warning("DDG rate-limited (attempt %d): %s", attempt + 1, exc)
+                formatted = "\n".join(
+                    f"• {r.get('title', '')}: {r.get('body', '')}" for r in results
+                )
+                top_url = results[0].get("href", "") or results[0].get("url", "")
+                _SEARCH_CACHE[key] = (now, formatted, top_url)
+                if len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+                    oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
+                    _SEARCH_CACHE.pop(oldest, None)
+                _search_state["consecutive_failures"] = 0
+                _search_state["down_until"] = None
+                log.info("search ok via %s (%d results) for: %s",
+                         backend or "default", len(results), query[:80])
+                return formatted, top_url
+            log.debug("search returned 0 results via %s for: %s", backend or "default", query[:80])
+        except _SearchException as exc:
+            log.warning("search via %s failed (attempt %d): %s", backend or "default", attempt + 1, exc)
         except BaseException:
-            log.warning("DDG search failed (attempt %d) for: %s", attempt + 1, query[:80], exc_info=True)
-            break  # non-rate-limit errors won't improve with a retry
-        if attempt < 2:
-            await asyncio.sleep(2 ** attempt)  # 1s, 2s backoff
-    return ""
+            log.warning("search via %s failed hard (attempt %d) for: %s",
+                        backend or "default", attempt + 1, query[:80], exc_info=True)
+        if attempt < len(_SEARCH_BACKENDS) - 1:
+            await asyncio.sleep(min(2 ** attempt, 4) * random.uniform(0.5, 1.5))
+
+    _search_state["consecutive_failures"] += 1
+    if _search_state["consecutive_failures"] >= 2:
+        _search_state["down_until"] = now + timedelta(seconds=_SEARCH_BREAKER_SECS)
+        log.warning("search circuit breaker OPEN for %ds after %d full failures",
+                    _SEARCH_BREAKER_SECS, _search_state["consecutive_failures"])
+    return "", ""
 
 
 _URL_RE = re.compile(r"https?://[^\s>\"']+", re.IGNORECASE)
@@ -1124,10 +1189,27 @@ class LLM(commands.Cog):
                 session["messages"], raw_text, intent_check=not relevant_mems
             )
             if search_query:
-                snippets = await _web_search(search_query)
+                snippets, top_url = await _web_search(search_query)
                 if snippets:
-                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
+                    # Deep-fetch the top result — snippets alone are often too
+                    # thin to actually answer (patch notes, stats, guides)
+                    page_extra = ""
+                    if top_url:
+                        page_text = await _fetch_url(top_url)
+                        if page_text:
+                            page_extra = f"\n\n[Top result ({top_url}):\n{page_text[:2500]}]"
+                    call_content = (f"[Web search for '{search_query}':\n{snippets}{page_extra}]"
+                                    f"\n\n{user_content}")
                     context_tag = f"Searched: {search_query}"
+                else:
+                    # Don't silently answer from stale training data — tell the
+                    # model the search failed so it can say so
+                    call_content = (
+                        f"[NOTE: you tried to web-search '{search_query}' but the search "
+                        f"service is currently unreachable. Answer from what you know and "
+                        f"briefly mention you couldn't verify online.]\n\n{user_content}"
+                    )
+                    context_tag = "Search unavailable"
 
         system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id, relevant_mems)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
