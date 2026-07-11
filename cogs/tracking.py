@@ -60,6 +60,8 @@ def _get_platform(member: discord.Member) -> str:
 class Tracking(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        # on_ready fires again on every gateway reconnect, not just startup
+        self._recovered_once = False
 
     def _ensure_user(self, member: discord.Member) -> None:
         database.upsert_user(
@@ -70,19 +72,30 @@ class Tracking(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        """Recover tracking state for all current guild members on bot start/restart."""
+        """Reconcile tracking state with reality on startup AND every reconnect.
+
+        First run (process start): the bot may have been down for a while, so
+        every open session is stale — close all with the STALE_CAP and re-open
+        from current member state.
+
+        Reconnects: the process never died, so an open session that still
+        matches the member's current state (same game, same voice channel,
+        still online) is left untouched — closing and re-opening it would
+        erase streak days, partner overlap, and session counts every time the
+        websocket blips.
+        """
         guild = self.bot.get_guild(config.GUILD_ID)
         if guild is None:
             return
 
-        # Close any sessions the DB thinks are still open (stale from last run)
-        stale = database.get_active_sessions()
-        for s in stale:
-            database.close_session(s["user_id"], s["session_type"], cap_seconds=STALE_CAP, stale=True)
-        if stale:
-            log.info("Closed %d stale sessions from previous run", len(stale))
+        first_run = not self._recovered_once
+        self._recovered_once = True
 
-        # Re-open sessions based on current member states
+        open_sessions: dict[tuple[int, str], dict] = {}
+        for s in database.get_active_sessions():
+            open_sessions[(s["user_id"], s["session_type"])] = s
+
+        kept = closed = opened = 0
         for member in guild.members:
             if member.bot:
                 continue
@@ -91,18 +104,50 @@ class Tracking(commands.Cog):
             game = _get_game(member)
             in_voice = member.voice and member.voice.channel
 
-            # Open online session if online/dnd, OR if actively gaming/in voice
+            # Online if online/dnd, OR actively gaming/in voice
             # (you can't be gaming or in voice while truly offline)
+            desired: dict[str, dict] = {}
             if _is_online(member.status) or game or in_voice:
-                database.open_session(member.id, "online", platform=_get_platform(member))
-
+                desired["online"] = {"platform": _get_platform(member)}
             if game:
-                database.open_session(member.id, "gaming", game_name=game)
-
+                desired["gaming"] = {"game_name": game}
             if in_voice:
-                database.open_session(member.id, "voice", voice_channel_id=member.voice.channel.id)
+                desired["voice"] = {"voice_channel_id": member.voice.channel.id}
 
-        log.info("Presence recovery complete for guild %s", guild.name)
+            for stype in ("online", "gaming", "voice"):
+                sess = open_sessions.pop((member.id, stype), None)
+                want = desired.get(stype)
+
+                keep = False
+                if sess and want and not first_run:
+                    if stype == "gaming":
+                        keep = sess["game_name"] == want["game_name"]
+                    elif stype == "voice":
+                        keep = sess["voice_channel_id"] == want["voice_channel_id"]
+                    else:
+                        keep = True
+
+                if keep:
+                    kept += 1
+                    continue
+                if sess:
+                    database.close_session(
+                        member.id, stype,
+                        cap_seconds=STALE_CAP if first_run else None,
+                        stale=first_run,
+                    )
+                    closed += 1
+                if want:
+                    database.open_session(member.id, stype, **want)
+                    opened += 1
+
+        # Anything left belongs to members no longer visible — close as stale
+        for (uid, stype), _sess in open_sessions.items():
+            database.close_session(uid, stype, cap_seconds=STALE_CAP, stale=True)
+            closed += 1
+
+        log.info("Presence recovery (%s) for guild %s: %d kept, %d closed, %d opened",
+                 "startup" if first_run else "reconnect", guild.name, kept, closed, opened)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:

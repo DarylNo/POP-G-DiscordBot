@@ -228,9 +228,17 @@ def _chunk_text(text: str, limit: int) -> list[str]:
 
 
 def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
+    # Hard-split any single line longer than a page so no page can exceed the limit
+    lines: list[str] = []
+    for line in text.splitlines():
+        while len(line) > page_size:
+            lines.append(line[:page_size])
+            line = line[page_size:]
+        lines.append(line)
+
     pages, current = [], []
     length = 0
-    for line in text.splitlines():
+    for line in lines:
         if length + len(line) + 1 > page_size and current:
             pages.append("\n".join(current))
             current, length = [], 0
@@ -244,20 +252,29 @@ def _paginate(text: str, page_size: int = _CHARS_PER_PAGE) -> list[str]:
 def _get_dm_session(user_id: int) -> dict:
     """Return the in-memory DM session for a user, loading from DB on cache miss.
 
-    Evicts expired sessions (idle > _DM_HISTORY_TTL) and starts fresh.
+    Evicts expired sessions (idle > _DM_HISTORY_TTL) and starts fresh. The DB
+    row's last_updated is honored on load so a bot restart can't resurrect
+    history the TTL would have expired.
     """
     now = datetime.now(timezone.utc)
     session = _dm_sessions.get(user_id)
 
     if session is None:
-        stored = database.get_dm_history(user_id)
-        session = {"messages": stored, "last_active": now}
+        row = database.get_dm_history_row(user_id)
+        stored = row["messages"] if row else []
+        last_active = now
+        if row:
+            try:
+                last_active = datetime.fromisoformat(row["last_updated"])
+            except (ValueError, TypeError):
+                pass
+        session = {"messages": stored, "last_active": last_active}
         _dm_sessions[user_id] = session
 
     if (now - session["last_active"]).total_seconds() > _DM_HISTORY_TTL:
         session["messages"] = []
-        session["last_active"] = now
         database.delete_dm_history(user_id)
+    session["last_active"] = now
 
     return session
 
@@ -317,6 +334,12 @@ async def _ollama_generate(
     return data.get("message", {}).get("content", "").strip()
 
 
+# Background analysis (memory extraction, summaries) is serialized so a burst of
+# chunk events or chat replies can't pile several requests onto Ollama at once
+# and starve interactive !chat/DM generations.
+_analysis_lock = asyncio.Lock()
+
+
 async def _ollama_analyse(
     prompt: str = "",
     system: str = "",
@@ -324,8 +347,9 @@ async def _ollama_analyse(
     messages: list[dict] | None = None,
     num_ctx: int | None = None,
 ) -> str:
-    """Analysis tasks — same instance, unlimited context by default."""
-    return await _ollama_generate(prompt, system, messages=messages, num_ctx=num_ctx)
+    """Analysis tasks — same instance, unlimited context by default, one at a time."""
+    async with _analysis_lock:
+        return await _ollama_generate(prompt, system, messages=messages, num_ctx=num_ctx)
 
 
 _SEARCH_INTENT_SYSTEM = (
@@ -343,28 +367,38 @@ _SEARCH_INTENT_SYSTEM = (
     "If this is definitively a timeless question, reply with exactly: NOOP"
 )
 
-# Keywords that always trigger a search, bypassing the intent check
+# Phrases that always trigger a search, bypassing the intent check. Kept
+# deliberately specific — loose words like "update"/"meta"/"cost" or a bare
+# year match casual chat constantly and spam DDG with raw messages.
 _SEARCH_FORCE_PATTERNS = re.compile(
-    r"\b(today|tonight|right now|currently|latest|newest|patch|hotfix|update|"
-    r"meta|tier list|just released|out now|new season|announced|patch notes|"
-    r"202[4-9]|how much|price|cost|review|best build|loadout|weapon stats|"
-    r"coming out|release date|download|available now|server status|"
-    r"is .* down|when does|still worth|dead game)\b",
+    r"\b(patch notes|tier list|release date|server status|patch \d|new season|"
+    r"just released|out now|coming out|latest (?:patch|update|version|news)|"
+    r"how much (?:is|does|are|for)|price of|is \w+ (?:down|offline)|"
+    r"when does \w+(?: \w+){0,4} (?:release|come out|start|end|drop)|"
+    r"still worth (?:playing|buying)|dead game|best (?:build|loadout) (?:for|in))\b",
     re.IGNORECASE,
 )
+
+_SEARCH_FORCED_QUERY_MAX = 300  # cap raw-message queries sent to DDG
 
 _SEARCH_INTENT_TIMEOUT = 120  # seconds — give the model time on slower hardware
 
 
-async def _maybe_search(history: list[dict], user_text: str) -> str | None:
+async def _maybe_search(history: list[dict], user_text: str, *, intent_check: bool = True) -> str | None:
     """Ask the model if a web search would help. Returns the query string or None.
 
     Bypasses the Ollama intent check for messages that obviously need current info.
+    intent_check=False skips the model-driven check (used when stored memories
+    already cover the question) but keyword-forced searches still fire — a memory
+    like 'X plays Battlefield' must not suppress 'when is the new Battlefield patch'.
     """
     # Fast path: keywords that always need a search
     if _SEARCH_FORCE_PATTERNS.search(user_text):
         log.debug("Search forced by keyword match for: %s", user_text[:80])
-        return user_text  # use the raw message as the search query
+        return user_text[:_SEARCH_FORCED_QUERY_MAX]  # raw message as query, capped
+
+    if not intent_check:
+        return None
 
     intent_messages = [
         {"role": "system", "content": _SEARCH_INTENT_SYSTEM},
@@ -384,13 +418,24 @@ async def _maybe_search(history: list[dict], user_text: str) -> str | None:
     return None
 
 
-async def _web_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
+try:
     from duckduckgo_search import DDGS
     try:
         from duckduckgo_search.exceptions import DuckDuckGoSearchException
     except ImportError:
         DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
+    _DDG_AVAILABLE = True
+except ImportError:
+    DDGS = None  # type: ignore[misc,assignment]
+    DuckDuckGoSearchException = Exception  # type: ignore[misc,assignment]
+    _DDG_AVAILABLE = False
+    log.warning("duckduckgo_search not installed — web search disabled")
+
+
+async def _web_search(query: str, max_results: int = 5) -> str:
+    """Search DuckDuckGo and return formatted snippets, or empty string on failure."""
+    if not _DDG_AVAILABLE:
+        return ""
 
     def _sync_search() -> list:
         return list(DDGS(timeout=15).text(query, max_results=max_results))
@@ -459,6 +504,8 @@ _MEMORY_EXTRACT_SYSTEM = (
 _MEMORY_CONSOLIDATE_SYSTEM = (
     "Consolidate this memory list by merging related facts and removing redundant or "
     "outdated entries. Keep the most specific and useful details. "
+    "Only rephrase and merge what is in the list — never invent new facts, names, or "
+    "events that are not present in the input. "
     "Reply with a bullet list only."
 )
 
@@ -497,7 +544,13 @@ async def _extract_memories(exchange: list[dict]) -> list[str]:
 
 
 async def _consolidate_memories(memories: list[str]) -> list[str]:
-    """Ask the model to condense a large memory list."""
+    """Ask the model to condense a large memory list.
+
+    Consolidation is lossy and a bad generation can corrupt long-term memory,
+    so the output is sanity-checked: an empty or implausibly small result is
+    rejected and the originals are kept (trimmed to the most recent entries).
+    """
+    fallback = memories[-_MEMORY_TARGET:]
     bullet_list = "\n".join(f"• {m}" for m in memories)
     try:
         result = await asyncio.wait_for(
@@ -509,24 +562,52 @@ async def _consolidate_memories(memories: list[str]) -> list[str]:
         )
     except Exception:
         log.warning("Memory consolidation failed — keeping existing")
-        return memories[-_MEMORY_TARGET:]
+        return fallback
     lines = [line.lstrip("•-* 0123456789.)").strip() for line in result.splitlines()]
     condensed = [l for l in lines if l]
-    return condensed if condensed else memories[-_MEMORY_TARGET:]
+    # Reject suspiciously lossy output — a valid consolidation of 150+ entries
+    # shouldn't collapse below a handful of facts.
+    if len(condensed) < max(10, len(memories) // 6):
+        log.warning("Memory consolidation output too small (%d from %d) — rejected",
+                    len(condensed), len(memories))
+        return fallback
+    return condensed
+
+
+# Guards every read-modify-write of a memory scope. Without it, a slow
+# consolidation (minutes of Ollama time) racing a chunk extraction or the
+# daily stats refresh silently drops whichever write lands first.
+_memory_write_lock = asyncio.Lock()
+
+
+async def _merge_memories(scope_type: str, scope_id: int, new_facts: list[str]) -> None:
+    """Append new facts to a scope's memory list, consolidating (with backup) when it grows too long.
+
+    Exact-duplicate facts already in the pool are skipped — voice chunks and
+    the daily stats refresh would otherwise re-add the same lines repeatedly.
+    """
+    if not new_facts:
+        return
+    async with _memory_write_lock:
+        existing = database.get_memories(scope_type, scope_id)
+        seen = set(existing)
+        fresh = [f for f in new_facts if f not in seen]
+        if not fresh:
+            return
+        combined = existing + fresh
+        if len(combined) > _MEMORY_MAX:
+            log.info("Memory list for %s/%d hit %d — consolidating", scope_type, scope_id, len(combined))
+            # Keep a recoverable snapshot in case consolidation mangles the list
+            database.save_memories(f"{scope_type}_backup", scope_id, combined)
+            combined = await _consolidate_memories(combined)
+        database.save_memories(scope_type, scope_id, combined)
+        log.debug("Stored %d new memories for %s/%d (total: %d)", len(fresh), scope_type, scope_id, len(combined))
 
 
 async def _update_memories(scope_type: str, scope_id: int, exchange: list[dict]) -> None:
-    """Extract new facts from an exchange and persist them. Consolidates if list grows too long."""
+    """Extract new facts from an exchange and persist them."""
     new_facts = await _extract_memories(exchange)
-    if not new_facts:
-        return
-    existing = database.get_memories(scope_type, scope_id)
-    combined = existing + new_facts
-    if len(combined) > _MEMORY_MAX:
-        log.info("Memory list for %s/%d hit %d — consolidating", scope_type, scope_id, len(combined))
-        combined = await _consolidate_memories(combined)
-    database.save_memories(scope_type, scope_id, combined)
-    log.debug("Stored %d new memories for %s/%d (total: %d)", len(new_facts), scope_type, scope_id, len(combined))
+    await _merge_memories(scope_type, scope_id, new_facts)
 
 
 _MEMORY_STOPWORDS = {
@@ -537,19 +618,43 @@ _MEMORY_STOPWORDS = {
 }
 
 
-def _build_memory_block(scope_type: str, scope_id: int) -> str:
-    """Return a formatted memory injection string, or empty string if no memories."""
+# Max memories injected into the system prompt per message. Beyond this the
+# block is trimmed to relevant + most recent — keeps prompt-processing time and
+# context usage sane as the memory pool grows.
+_MEMORY_INJECT_MAX = 60
+
+
+def _build_memory_block(scope_type: str, scope_id: int, relevant: list[str] | None = None) -> str:
+    """Return a formatted memory injection string, or empty string if no memories.
+
+    Memories in `relevant` are excluded — they're injected separately right
+    before the question, and duplicating them here wastes context. Small pools
+    are injected whole; large pools are trimmed to the most recent entries.
+    """
     memories = database.get_memories(scope_type, scope_id)
-    if not memories:
+    relevant_set = set(relevant or [])
+    pool = [m for m in memories if m not in relevant_set]
+    if not pool:
         return ""
-    return (
-        "\n\nAll stored memories (voice sessions, chat history, game activity):\n"
-        + "\n".join(f"• {m}" for m in memories)
-    )
+    if len(pool) <= _MEMORY_INJECT_MAX:
+        header = "\n\nStored memories (voice sessions, chat history, game activity):\n"
+        selected = pool
+    else:
+        selected = pool[-_MEMORY_INJECT_MAX:]
+        header = (
+            f"\n\nStored memories — the {len(selected)} most recent of {len(memories)}:\n"
+        )
+    return header + "\n".join(f"• {m}" for m in selected)
+
+
+# Cap on query-relevant memories injected near the question. Substring matching
+# on common words used to return the entire pool for queries like "what games
+# did we play" — whole-word matching + scoring + this cap keep it focused.
+_MEMORY_RELEVANT_MAX = 12
 
 
 def _find_relevant_memories(scope_type: str, scope_id: int, query: str) -> list[str]:
-    """Return memories whose content overlaps with keywords in the query."""
+    """Return the most relevant memories for a query, ranked by whole-word overlap."""
     memories = database.get_memories(scope_type, scope_id)
     if not memories:
         return []
@@ -559,7 +664,14 @@ def _find_relevant_memories(scope_type: str, scope_id: int, query: str) -> list[
     }
     if not words:
         return []
-    return [m for m in memories if any(w in m.lower() for w in words)]
+    scored: list[tuple[int, str]] = []
+    for m in memories:
+        m_words = {w.lower() for w in re.findall(r"\b\w{3,}\b", m)}
+        hits = len(words & m_words)
+        if hits:
+            scored.append((hits, m))
+    scored.sort(key=lambda x: -x[0])  # stable: ties keep pool order
+    return [m for _, m in scored[:_MEMORY_RELEVANT_MAX]]
 
 
 async def _extract_transcript_memories(
@@ -596,11 +708,7 @@ async def _extract_transcript_memories(
         all_new_memories.extend(l for l in lines if l and l.upper() != "NONE")
 
     if all_new_memories:
-        existing = database.get_memories("guild", config.GUILD_ID)
-        combined = existing + all_new_memories
-        if len(combined) > _MEMORY_MAX:
-            combined = await _consolidate_memories(combined)
-        database.save_memories("guild", config.GUILD_ID, combined)
+        await _merge_memories("guild", config.GUILD_ID, all_new_memories)
         log.info("Session %d: extracted %d transcript memories across %d chunk(s) (mark=%s)",
                  session_id, len(all_new_memories), len(chunks), mark_extracted)
     if mark_extracted:
@@ -627,15 +735,31 @@ async def _refresh_gaming_stats_memories() -> None:
             line += f"; often games with {partners}"
         stats_memories.append(line)
     if stats_memories:
-        existing = database.get_memories("guild", config.GUILD_ID)
-        filtered = [m for m in existing if not m.startswith("[Stats]")]
-        database.save_memories("guild", config.GUILD_ID, filtered + stats_memories)
+        async with _memory_write_lock:
+            existing = database.get_memories("guild", config.GUILD_ID)
+            filtered = [m for m in existing if not m.startswith("[Stats]")]
+            # Stats go at the FRONT: the large-pool trim keeps the most recent
+            # entries, and ~20 daily [Stats] lines at the end would permanently
+            # crowd genuine conversation memories out of that window.
+            database.save_memories("guild", config.GUILD_ID, stats_memories + filtered)
         log.info("Refreshed %d gaming stats memories", len(stats_memories))
+
+
+# Keep references to fire-and-forget tasks so they can't be GC'd mid-flight
+_bg_tasks: set = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 class LLM(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        # on_ready fires on every gateway reconnect — recovery must run once
+        self._startup_recovery_done = False
         self._daily_stats_task.start()
 
     def cog_unload(self) -> None:
@@ -651,19 +775,36 @@ class LLM(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        """Process any transcripts that completed before memory extraction was added."""
+        """One-time startup recovery: backfill pending memories and finish
+        sessions the bot crashed out of mid-summary (stuck in 'processing')."""
+        if self._startup_recovery_done:
+            return
+        self._startup_recovery_done = True
+
         pending = database.get_transcripts_pending_memory()
         if pending:
             log.info("Processing %d transcript(s) pending memory extraction", len(pending))
             for row in pending:
                 segments = database.get_transcript_segments(row["id"])
-                asyncio.create_task(_extract_transcript_memories(row["id"], segments))
+                _spawn(_extract_transcript_memories(row["id"], segments))
+
+        stuck = database.get_transcripts_stuck_processing()
+        if stuck:
+            log.info("Re-dispatching %d transcript(s) stuck in 'processing'", len(stuck))
+            for row in stuck:
+                self.bot.dispatch("transcript_ready", row["id"])
 
     @commands.Cog.listener()
     async def on_transcript_ready(self, session_id: int) -> None:
-        """Fired by voice_listener after Whisper finishes. Generate and store the LLM summary."""
+        """Fired by voice_listener after Whisper finishes. Generate and store the LLM summary.
+
+        Memory extraction happens per chunk (including the final one) via
+        transcript_chunk_ready — re-extracting the full transcript here would
+        store every fact twice.
+        """
         segments = database.get_transcript_segments(session_id)
         if not segments:
+            database.set_transcript_status(session_id, "failed")
             return
 
         try:
@@ -679,23 +820,16 @@ class LLM(commands.Cog):
             return
 
         database.set_transcript_summary(session_id, summary)
+        database.mark_transcript_memory_extracted(session_id)
         log.info("Session %d: summary stored — use !recap to view.", session_id)
-
-        # Extract memories from the full session in the background
-        asyncio.create_task(_extract_transcript_memories(session_id, segments))
 
     @commands.Cog.listener()
     async def on_transcript_chunk_ready(self, session_id: int, segments: list[dict]) -> None:
-        """Fired by voice_listener after each rolling chunk is transcribed.
-
-        Extracts memories from the chunk immediately so the bot knows what's
-        being discussed during an active session — without waiting for !leave.
-        mark_extracted=False keeps the session available for full extraction later.
-        """
+        """Fired by voice_listener after each rolling chunk (and the final one)
+        is transcribed. Extracts memories from the chunk immediately so the bot
+        knows what's being discussed during an active session."""
         if segments:
-            asyncio.create_task(
-                _extract_transcript_memories(session_id, segments, mark_extracted=False)
-            )
+            _spawn(_extract_transcript_memories(session_id, segments, mark_extracted=False))
 
     @commands.cooldown(1, 10, commands.BucketType.user)
     @commands.command(name="recap")
@@ -731,8 +865,11 @@ class LLM(commands.Cog):
         if status == "recording":
             await ctx.send(f"Session #{sid} is still recording.")
             return
-        if status == "processing":
-            await ctx.send(f"Session #{sid} is still being processed — check back in a moment.")
+        # redo overrides 'processing' — a crash mid-summary leaves that status
+        # stuck forever, and redo is the manual way out
+        if status == "processing" and not redo:
+            await ctx.send(f"Session #{sid} is still being processed — check back in a moment. "
+                           f"(If it seems stuck, `!recap redo {sid}` forces a retry.)")
             return
 
         # Force regeneration if redo requested or previous attempt failed
@@ -936,28 +1073,26 @@ class LLM(commands.Cog):
             pass
         await ctx.send(embed=embed)
 
-    @commands.cooldown(1, 15, commands.BucketType.user)
-    @commands.command(name="chat", aliases=["ask"])
-    async def chat(self, ctx: commands.Context, *, message: str = None) -> None:
-        """Ask the local LLM a question, e.g. !chat what's a good co-op game?"""
-        if not message:
-            await ctx.send("Ask me something: `!chat <your question>`")
-            return
+    async def _run_chat(
+        self,
+        dest,  # anything with .typing() and .send() — a Context or a channel
+        *,
+        scope_type: str,
+        scope_id: int,
+        session: dict,
+        user_content: str,
+        raw_text: str,
+        max_turns: int,
+        persist,  # callable(messages) — writes history to the right DB table
+    ) -> None:
+        """Shared chat pipeline for !chat and DMs: context gathering → Ollama →
+        history persistence → chunked reply with timing → background memory extraction."""
+        relevant_mems = _find_relevant_memories(scope_type, scope_id, raw_text)
 
-        if ctx.guild is not None:
-            scope_type, scope_id = "guild", config.GUILD_ID
-            session = _get_ch_session(ctx.channel.id)
-            user_content = f"{ctx.author.display_name}: {message}"
-        else:
-            scope_type, scope_id = "dm", ctx.author.id
-            session = _get_dm_session(ctx.author.id)
-            user_content = message
-
-        # If the message contains URLs, fetch them; otherwise let the model decide to search
-        urls = _URL_RE.findall(message)[:_URL_MAX_PER_MSG]
+        # URLs in the message → fetch pages; otherwise consider a web search
+        urls = _URL_RE.findall(raw_text)[:_URL_MAX_PER_MSG]
         context_tag = None
         call_content = user_content
-        relevant_mems: list[str] = []
         if urls:
             pages = []
             for url in urls:
@@ -968,17 +1103,18 @@ class LLM(commands.Cog):
                 call_content = "\n\n".join(pages) + f"\n\n{user_content}"
                 context_tag = "Read: " + ", ".join(urls)
         else:
-            # Skip web search if relevant memories already cover the question
-            relevant_mems = _find_relevant_memories(scope_type, scope_id, message)
-            if not relevant_mems:
-                search_query = await _maybe_search(session["messages"], message)
-                if search_query:
-                    snippets = await _web_search(search_query)
-                    if snippets:
-                        call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
-                        context_tag = f"Searched: {search_query}"
+            # Memories covering the question skip the model intent check, but
+            # keyword-forced searches (patch notes, prices, ...) still fire.
+            search_query = await _maybe_search(
+                session["messages"], raw_text, intent_check=not relevant_mems
+            )
+            if search_query:
+                snippets = await _web_search(search_query)
+                if snippets:
+                    call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{user_content}"
+                    context_tag = f"Searched: {search_query}"
 
-        system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id)
+        system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id, relevant_mems)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(session["messages"])
         # Inject relevant memories right before the question so they're impossible to miss
@@ -989,44 +1125,75 @@ class LLM(commands.Cog):
             })
         full_messages.append({"role": "user", "content": call_content})
 
-        async with ctx.typing():
+        async with dest.typing():
             _t0 = datetime.now(timezone.utc)
             try:
                 reply = await _ollama_generate(messages=full_messages)
             except Exception:
-                log.exception("!chat: Ollama failed for user %d", ctx.author.id)
-                await ctx.send("The LLM isn't responding right now. Try again in a moment.")
+                log.exception("chat failed (%s/%d)", scope_type, scope_id)
+                await dest.send("The LLM isn't responding right now. Try again in a moment.")
                 return
             _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
 
         if not reply:
-            await ctx.send("I didn't get a response. Try rephrasing.")
+            await dest.send("I didn't get a response. Try rephrasing.")
             return
 
         stored_reply = f"[{context_tag}] {reply}" if context_tag else reply
         session["messages"].append({"role": "user",      "content": user_content})
         session["messages"].append({"role": "assistant", "content": stored_reply})
         session["last_active"] = datetime.now(timezone.utc)
-        max_items = (_CH_MAX_HISTORY_TURNS if ctx.guild else _DM_MAX_HISTORY_TURNS) * 2
+        max_items = max_turns * 2
         if len(session["messages"]) > max_items:
             session["messages"] = session["messages"][-max_items:]
-        if ctx.guild:
-            database.save_channel_chat_history(ctx.channel.id, session["messages"])
-        else:
-            database.save_dm_history(ctx.author.id, session["messages"])
+        persist(session["messages"])
 
         chunks = _chunk_text(reply, _CHAT_REPLY_LIMIT)
         for i, chunk in enumerate(chunks):
             if i == len(chunks) - 1:
-                await ctx.send(f"{chunk}\n-# ⏱ {_elapsed:.1f}s")
+                await dest.send(f"{chunk}\n-# ⏱ {_elapsed:.1f}s")
             else:
-                await ctx.send(chunk)
+                await dest.send(chunk)
 
         # Extract and store memories in the background — don't make the user wait
-        asyncio.create_task(_update_memories(scope_type, scope_id, [
+        _spawn(_update_memories(scope_type, scope_id, [
             {"role": "user",      "content": user_content},
             {"role": "assistant", "content": reply},
         ]))
+
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.command(name="chat", aliases=["ask"])
+    async def chat(self, ctx: commands.Context, *, message: str = None) -> None:
+        """Ask the local LLM a question, e.g. !chat what's a good co-op game?"""
+        if not message:
+            await ctx.send("Ask me something: `!chat <your question>`")
+            return
+        if len(message) > _DM_MAX_INPUT_CHARS:
+            message = message[:_DM_MAX_INPUT_CHARS]
+            log.warning("!chat from user %d truncated to %d chars", ctx.author.id, _DM_MAX_INPUT_CHARS)
+
+        if ctx.guild is not None:
+            channel_id = ctx.channel.id
+            await self._run_chat(
+                ctx,
+                scope_type="guild", scope_id=config.GUILD_ID,
+                session=_get_ch_session(channel_id),
+                user_content=f"{ctx.author.display_name}: {message}",
+                raw_text=message,
+                max_turns=_CH_MAX_HISTORY_TURNS,
+                persist=lambda msgs: database.save_channel_chat_history(channel_id, msgs),
+            )
+        else:
+            user_id = ctx.author.id
+            await self._run_chat(
+                ctx,
+                scope_type="dm", scope_id=user_id,
+                session=_get_dm_session(user_id),
+                user_content=message,
+                raw_text=message,
+                max_turns=_DM_MAX_HISTORY_TURNS,
+                persist=lambda msgs: database.save_dm_history(user_id, msgs),
+            )
 
     @chat.error
     async def chat_error(self, ctx: commands.Context, error: Exception) -> None:
@@ -1060,80 +1227,22 @@ class LLM(commands.Cog):
             text = text[:_DM_MAX_INPUT_CHARS]
             log.warning("DM from user %d truncated to %d chars", message.author.id, _DM_MAX_INPUT_CHARS)
 
-        session = _get_dm_session(message.author.id)
-
-        # URLs in message → fetch pages; otherwise let the model decide to search
-        urls = _URL_RE.findall(text)[:_URL_MAX_PER_MSG]
-        context_tag = None
-        call_content = text
-        dm_relevant_mems: list[str] = []
-        if urls:
-            pages = []
-            for url in urls:
-                page_text = await _fetch_url(url)
-                if page_text:
-                    pages.append(f"[Content of {url}]\n{page_text}")
-            if pages:
-                call_content = "\n\n".join(pages) + f"\n\n{text}"
-                context_tag = "Read: " + ", ".join(urls)
-        else:
-            dm_relevant_mems = _find_relevant_memories("dm", message.author.id, text)
-            if not dm_relevant_mems:
-                search_query = await _maybe_search(session["messages"], text)
-                if search_query:
-                    snippets = await _web_search(search_query)
-                    if snippets:
-                        call_content = f"[Web search for '{search_query}':\n{snippets}]\n\n{text}"
-                        context_tag = f"Searched: {search_query}"
-
-        system_with_memory = _CHAT_SYSTEM + _build_memory_block("dm", message.author.id)
-        full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
-        full_messages.extend(session["messages"])
-        if dm_relevant_mems:
-            full_messages.append({
-                "role": "system",
-                "content": "Relevant memories for this question:\n" + "\n".join(f"• {m}" for m in dm_relevant_mems),
-            })
-        full_messages.append({"role": "user", "content": call_content})
-
-        async with message.channel.typing():
-            _t0 = datetime.now(timezone.utc)
-            try:
-                reply = await _ollama_generate(messages=full_messages)
-            except Exception:
-                log.exception("DM chat failed for user %d", message.author.id)
-                await message.channel.send("The AI isn't responding right now — try again in a moment.")
-                return
-            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
-
-        if not reply:
-            await message.channel.send("No response — try rephrasing.")
-            return
-
-        stored_reply = f"[{context_tag}] {reply}" if context_tag else reply
-        session["messages"].append({"role": "user",      "content": text})
-        session["messages"].append({"role": "assistant", "content": stored_reply})
-        session["last_active"] = datetime.now(timezone.utc)
-        max_items = _DM_MAX_HISTORY_TURNS * 2
-        if len(session["messages"]) > max_items:
-            session["messages"] = session["messages"][-max_items:]
-        database.save_dm_history(message.author.id, session["messages"])
-
-        chunks = _chunk_text(reply, _CHAT_REPLY_LIMIT)
-        for i, chunk in enumerate(chunks):
-            if i == len(chunks) - 1:
-                await message.channel.send(f"{chunk}\n-# ⏱ {_elapsed:.1f}s")
-            else:
-                await message.channel.send(chunk)
-
-        asyncio.create_task(_update_memories("dm", message.author.id, [
-            {"role": "user",      "content": text},
-            {"role": "assistant", "content": reply},
-        ]))
+        user_id = message.author.id
+        await self._run_chat(
+            message.channel,
+            scope_type="dm", scope_id=user_id,
+            session=_get_dm_session(user_id),
+            user_content=text,
+            raw_text=text,
+            max_turns=_DM_MAX_HISTORY_TURNS,
+            persist=lambda msgs: database.save_dm_history(user_id, msgs),
+        )
 
     @commands.command(name="reset")
-    async def reset_dm(self, ctx: commands.Context) -> None:
-        """Clear DM conversation history (DMs) or this channel's !chat history (admins)."""
+    async def reset_dm(self, ctx: commands.Context, scope: str = None) -> None:
+        """Clear chat history. In DMs: your history + memories. In a server
+        (admin): this channel's !chat history; `!reset all` also wipes the
+        server-wide memory pool."""
         if ctx.guild is not None:
             from cogs.admin import _is_admin
             if not _is_admin(ctx):
@@ -1141,12 +1250,18 @@ class LLM(commands.Cog):
                 return
             _ch_sessions.pop(ctx.channel.id, None)
             database.delete_channel_chat_history(ctx.channel.id)
-            database.delete_memories("guild", config.GUILD_ID)
-            await ctx.send("Channel chat history and server memories cleared — fresh start!")
+            if scope and scope.lower() == "all":
+                database.delete_memories("guild", config.GUILD_ID)
+                database.delete_memories("guild_backup", config.GUILD_ID)
+                await ctx.send("Channel chat history AND all server memories cleared — full fresh start!")
+            else:
+                await ctx.send("Channel chat history cleared. (Server memories kept — "
+                               "`!reset all` wipes those too.)")
         else:
             _dm_sessions.pop(ctx.author.id, None)
             database.delete_dm_history(ctx.author.id)
             database.delete_memories("dm", ctx.author.id)
+            database.delete_memories("dm_backup", ctx.author.id)
             await ctx.send("History and memories cleared — fresh start!")
 
     @when.error
