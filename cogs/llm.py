@@ -40,8 +40,8 @@ _CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS", "30"))   # more 
 _dm_sessions: dict[int, dict] = {}
 # channel_id → {"messages": list[dict], "last_active": datetime}
 _ch_sessions: dict[int, dict] = {}
-# user_id → datetime of last processed DM (rate limiting)
-_dm_last_message: dict[int, datetime] = {}
+# user_id → datetime of last unprefixed chat (DM or guild mention) — rate limiting
+_last_chat_at: dict[int, datetime] = {}
 
 _TZ_TORONTO = ZoneInfo("America/Toronto")
 
@@ -1087,6 +1087,7 @@ class LLM(commands.Cog):
     ) -> None:
         """Shared chat pipeline for !chat and DMs: context gathering → Ollama →
         history persistence → chunked reply with timing → background memory extraction."""
+        _t_start = datetime.now(timezone.utc)
         relevant_mems = _find_relevant_memories(scope_type, scope_id, raw_text)
 
         # URLs in the message → fetch pages; otherwise consider a web search
@@ -1148,10 +1149,18 @@ class LLM(commands.Cog):
             session["messages"] = session["messages"][-max_items:]
         persist(session["messages"])
 
+        # Timing subtext: LLM generation time, plus the total when context
+        # gathering (search intent check, DDG, URL fetches) added real latency
+        _total = (datetime.now(timezone.utc) - _t_start).total_seconds()
+        if _total - _elapsed >= 1.0:
+            timing = f"⏱ {_total:.1f}s (LLM {_elapsed:.1f}s)"
+        else:
+            timing = f"⏱ {_elapsed:.1f}s"
+
         chunks = _chunk_text(reply, _CHAT_REPLY_LIMIT)
         for i, chunk in enumerate(chunks):
             if i == len(chunks) - 1:
-                await dest.send(f"{chunk}\n-# ⏱ {_elapsed:.1f}s")
+                await dest.send(f"{chunk}\n-# {timing}")
             else:
                 await dest.send(chunk)
 
@@ -1202,41 +1211,166 @@ class LLM(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        """Unprefixed chat: DMs always; in guild channels when Toaster is
+        @mentioned or the message replies to one of Toaster's messages."""
         if message.author.bot:
             return
-        if message.guild is not None:
-            return  # only handle DMs
         if message.content.startswith(config.PREFIX):
             return  # prefixed command — process_commands handles it
 
-        text = message.content.strip()
-        if not text:
-            await message.channel.send("I can only read text — send me something to chat about!")
-            return
+        if message.guild is not None:
+            mentioned = self.bot.user in message.mentions
+            ref = message.reference.resolved if message.reference else None
+            replying_to_bot = (
+                ref is not None
+                and getattr(ref, "author", None) is not None
+                and ref.author.id == self.bot.user.id
+            )
+            if not (mentioned or replying_to_bot):
+                return
+            text = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
+            if not text:
+                await message.channel.send("You rang? Ask me something.")
+                return
+        else:
+            text = message.content.strip()
+            if not text:
+                await message.channel.send("I can only read text — send me something to chat about!")
+                return
 
-        # Rate limit
+        # Rate limit (shared across DMs and guild mentions)
         now = datetime.now(timezone.utc)
-        last = _dm_last_message.get(message.author.id)
+        last = _last_chat_at.get(message.author.id)
         if last is not None and (now - last).total_seconds() < _DM_RATE_PERIOD:
             wait = _DM_RATE_PERIOD - (now - last).total_seconds()
             await message.channel.send(f"Slow down — try again in {wait:.0f}s.")
             return
-        _dm_last_message[message.author.id] = now
+        _last_chat_at[message.author.id] = now
+        if len(_last_chat_at) > 500:  # prune so the map can't grow unbounded
+            cutoff = now - timedelta(hours=1)
+            for uid in [u for u, t in _last_chat_at.items() if t < cutoff]:
+                _last_chat_at.pop(uid, None)
 
         if len(text) > _DM_MAX_INPUT_CHARS:
             text = text[:_DM_MAX_INPUT_CHARS]
-            log.warning("DM from user %d truncated to %d chars", message.author.id, _DM_MAX_INPUT_CHARS)
+            log.warning("Chat from user %d truncated to %d chars", message.author.id, _DM_MAX_INPUT_CHARS)
 
-        user_id = message.author.id
-        await self._run_chat(
-            message.channel,
-            scope_type="dm", scope_id=user_id,
-            session=_get_dm_session(user_id),
-            user_content=text,
-            raw_text=text,
-            max_turns=_DM_MAX_HISTORY_TURNS,
-            persist=lambda msgs: database.save_dm_history(user_id, msgs),
+        if message.guild is not None:
+            channel_id = message.channel.id
+            await self._run_chat(
+                message.channel,
+                scope_type="guild", scope_id=config.GUILD_ID,
+                session=_get_ch_session(channel_id),
+                user_content=f"{message.author.display_name}: {text}",
+                raw_text=text,
+                max_turns=_CH_MAX_HISTORY_TURNS,
+                persist=lambda msgs: database.save_channel_chat_history(channel_id, msgs),
+            )
+        else:
+            user_id = message.author.id
+            await self._run_chat(
+                message.channel,
+                scope_type="dm", scope_id=user_id,
+                session=_get_dm_session(user_id),
+                user_content=text,
+                raw_text=text,
+                max_turns=_DM_MAX_HISTORY_TURNS,
+                persist=lambda msgs: database.save_dm_history(user_id, msgs),
+            )
+
+    def _memory_scope(self, ctx: commands.Context) -> tuple[str, int]:
+        """Guild context → server memories; DM → the user's own memories."""
+        if ctx.guild is not None:
+            return "guild", config.GUILD_ID
+        return "dm", ctx.author.id
+
+    def _can_manage_memories(self, ctx: commands.Context) -> bool:
+        """Anyone can manage their own DM memories; guild memories are admin-only."""
+        if ctx.guild is None:
+            return True
+        from cogs.admin import _is_admin
+        return _is_admin(ctx)
+
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    @commands.command(name="memories")
+    async def memories_cmd(self, ctx: commands.Context, page: int = 1) -> None:
+        """Show what Toaster remembers (server memories in a channel, yours in a DM)."""
+        scope_type, scope_id = self._memory_scope(ctx)
+        mems = database.get_memories(scope_type, scope_id)
+        if not mems:
+            await ctx.send("No memories stored yet.")
+            return
+
+        per_page = 15
+        pages = (len(mems) + per_page - 1) // per_page
+        page = max(1, min(page, pages))
+        start = (page - 1) * per_page
+        lines = [f"`{start + i + 1}.` {m[:150]}" for i, m in enumerate(mems[start:start + per_page])]
+
+        title = "Toaster's Server Memories" if scope_type == "guild" else "Toaster's Memories of You"
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
         )
+        footer = f"{len(mems)} total · page {page}/{pages}"
+        if self._can_manage_memories(ctx):
+            footer += " · !forget <number> to remove one"
+        embed.set_footer(text=footer)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="forget")
+    async def forget(self, ctx: commands.Context, *, target: str = None) -> None:
+        """Remove a memory by its !memories number, or by matching text."""
+        if not target:
+            await ctx.send("Usage: `!forget <number>` (from `!memories`) or `!forget <text to match>`")
+            return
+        if not self._can_manage_memories(ctx):
+            await ctx.send("Only admins can manage server memories. (DM me to manage your own.)")
+            return
+
+        scope_type, scope_id = self._memory_scope(ctx)
+        mems = database.get_memories(scope_type, scope_id)
+        if not mems:
+            await ctx.send("No memories stored.")
+            return
+
+        if target.isdigit():
+            idx = int(target) - 1
+            if not 0 <= idx < len(mems):
+                await ctx.send(f"Number out of range — there are {len(mems)} memories (see `!memories`).")
+                return
+            removed = mems.pop(idx)
+        else:
+            matches = [(i, m) for i, m in enumerate(mems) if target.lower() in m.lower()]
+            if not matches:
+                await ctx.send("No memory matches that text.")
+                return
+            if len(matches) > 1:
+                preview = "\n".join(f"`{i + 1}.` {m[:100]}" for i, m in matches[:5])
+                await ctx.send(f"{len(matches)} memories match — be more specific or use the number:\n{preview}")
+                return
+            idx, removed = matches[0]
+            mems.pop(idx)
+
+        database.save_memories(scope_type, scope_id, mems)
+        await ctx.send(f"Forgotten: _{removed[:200]}_")
+
+    @commands.command(name="memoryrestore")
+    async def memoryrestore(self, ctx: commands.Context) -> None:
+        """Restore memories from the pre-consolidation backup snapshot."""
+        if not self._can_manage_memories(ctx):
+            await ctx.send("Only admins can restore server memories.")
+            return
+        scope_type, scope_id = self._memory_scope(ctx)
+        backup = database.get_memories(f"{scope_type}_backup", scope_id)
+        if not backup:
+            await ctx.send("No backup snapshot available — one is saved automatically before each consolidation.")
+            return
+        current = len(database.get_memories(scope_type, scope_id))
+        database.save_memories(scope_type, scope_id, backup)
+        await ctx.send(f"Restored {len(backup)} memories from the pre-consolidation backup "
+                       f"(replaced {current}).")
 
     @commands.command(name="reset")
     async def reset_dm(self, ctx: commands.Context, scope: str = None) -> None:
@@ -1284,14 +1418,31 @@ class LLM(commands.Cog):
 
     @commands.guild_only()
     @commands.command(name="memorybuild", aliases=["rebuildmemory"])
-    async def memorybuild(self, ctx: commands.Context) -> None:
-        """Admin: backfill memories from all existing transcripts and refresh game stats."""
+    async def memorybuild(self, ctx: commands.Context, mode: str = None) -> None:
+        """Admin: backfill memories from transcripts that haven't been processed.
+
+        `!memorybuild full` wipes the guild memory pool and re-extracts from
+        EVERY stored transcript — a true rebuild (a backup of the old pool is
+        kept; `!memoryrestore` undoes it).
+        """
         from cogs.admin import _is_admin
         if not _is_admin(ctx):
             await ctx.send("Admin only.")
             return
 
-        msg = await ctx.send("Building memories from existing data… this may take a while.")
+        if mode and mode.lower() == "full":
+            old = database.get_memories("guild", config.GUILD_ID)
+            if old:
+                database.save_memories("guild_backup", config.GUILD_ID, old)
+            database.save_memories("guild", config.GUILD_ID, [])
+            reset = database.reset_memory_extraction()
+            msg = await ctx.send(
+                f"Full rebuild: cleared {len(old)} memories (backup kept — `!memoryrestore` undoes), "
+                f"re-extracting from {reset} transcript(s)…"
+            )
+        else:
+            msg = await ctx.send("Building memories from unprocessed data… this may take a while. "
+                                 "(`!memorybuild full` re-extracts everything from scratch.)")
 
         try:
             pending = database.get_transcripts_pending_memory()

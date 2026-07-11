@@ -2,7 +2,7 @@
 
 The Discord bot for **Past our Prime Gamers**. Silently tracks member activity, runs an AI chat assistant powered by local LLMs, and transcribes voice sessions.
 
-Current version: **1.9.1**
+Current version: **1.10.0**
 
 ---
 
@@ -46,10 +46,13 @@ All data is stored locally in a SQLite database (`popg.db`). Nothing is posted t
 | `!recap <session_id>` | Everyone | AI-generated summary of a past voice session |
 | `!transcript <session_id>` | Everyone | Raw transcript of a voice session |
 | `!sessions` | Everyone | List recent recorded voice sessions |
-| `!memorybuild` | Admin | Rebuild Toaster's memory from all stored transcripts |
+| `!memories [page]` | Everyone | See what Toaster remembers (server-wide in channels, personal in DMs) |
+| `!forget <number\|text>` | Admin (server) / Everyone (DM) | Remove a specific memory |
+| `!memoryrestore` | Admin (server) / Everyone (DM) | Restore memories from the pre-consolidation backup |
+| `!memorybuild [full]` | Admin | Backfill memories; `full` wipes and re-extracts from every transcript |
 | `!reset` | Everyone (DM) / Admin (server) | Clear chat history; `!reset all` also wipes server memories |
 
-Toaster also responds to DMs directly.
+Toaster also responds to DMs directly, and in server channels when @mentioned or when you reply to one of its messages — no `!chat` needed.
 
 ### Voice recording
 | Command | Who | Description |
