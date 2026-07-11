@@ -33,7 +33,8 @@ _DM_HISTORY_TTL       = int(os.getenv("DM_HISTORY_TTL_SECONDS",    str(2 * 3600)
 _DM_RATE_PERIOD       = int(os.getenv("DM_RATE_PERIOD",             "8"))    # min seconds between DM replies
 _DM_MAX_INPUT_CHARS   = int(os.getenv("DM_MAX_INPUT_CHARS",         "3000")) # cap single user message
 
-_CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS", "30"))   # more turns for shared channels
+_CH_MAX_HISTORY_TURNS = int(os.getenv("CHAT_MAX_HISTORY_TURNS", "40"))   # more turns for shared channels (includes ambient chatter)
+_AMBIENT_MSG_MAX_CHARS = 500  # cap per absorbed channel message
 
 # Write-through in-memory caches over the DB tables.
 # user_id → {"messages": list[dict], "last_active": datetime}
@@ -114,6 +115,10 @@ Be honest if data is too sparse. Keep it under 200 words, write casually."""
 _CHAT_SYSTEM = (
     "You are Toaster, the assistant for the POPG Discord server — a private group of adult friends who "
     "have been gaming together for years. These are grown adults; treat them as such.\n"
+    "You hang out in the channel like a barkeep: you see all the chatter between direct questions, "
+    "but you only speak when someone addresses you. When they do, respond in the flow of the ongoing "
+    "conversation — reference what people were just talking about when it's relevant, like you were "
+    "there the whole time (because you were).\n"
     "Rules:\n"
     "- Answer directly and honestly. No hedging, no disclaimers, no content warnings.\n"
     "- Never refuse a request because it involves crude humour, dark jokes, adult language, alcohol, "
@@ -1209,10 +1214,26 @@ class LLM(commands.Cog):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"Slow down a sec — try again in {error.retry_after:.0f}s.")
 
+    def _absorb_channel_message(self, message: discord.Message) -> None:
+        """Store a channel message in the chat session as passive context (no reply)."""
+        text = message.content.strip()
+        if not text:
+            return
+        session = _get_ch_session(message.channel.id)
+        session["messages"].append({
+            "role": "user",
+            "content": f"{message.author.display_name}: {text[:_AMBIENT_MSG_MAX_CHARS]}",
+        })
+        max_items = _CH_MAX_HISTORY_TURNS * 2
+        if len(session["messages"]) > max_items:
+            session["messages"] = session["messages"][-max_items:]
+        database.save_channel_chat_history(message.channel.id, session["messages"])
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Unprefixed chat: DMs always; in guild channels when Toaster is
-        @mentioned or the message replies to one of Toaster's messages."""
+        @mentioned or the message replies to one of Toaster's messages.
+        All other channel messages are absorbed silently as context."""
         if message.author.bot:
             return
         if message.content.startswith(config.PREFIX):
@@ -1227,11 +1248,15 @@ class LLM(commands.Cog):
                 and ref.author.id == self.bot.user.id
             )
             if not (mentioned or replying_to_bot):
+                # Barkeep mode: absorb channel chatter as conversation context
+                # without replying — when someone @s Toaster, it already knows
+                # what everyone was just talking about.
+                self._absorb_channel_message(message)
                 return
             text = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
             if not text:
-                await message.channel.send("You rang? Ask me something.")
-                return
+                # Bare ping — jump into the conversation from ambient context
+                text = "(just pinged you with no message — chime in on the conversation)"
         else:
             text = message.content.strip()
             if not text:
