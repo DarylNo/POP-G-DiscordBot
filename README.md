@@ -2,7 +2,7 @@
 
 The Discord bot for **Past our Prime Gamers**. Silently tracks member activity, runs an AI chat assistant powered by local LLMs, and transcribes voice sessions.
 
-Current version: **1.8.1**
+Current version: **1.9.1**
 
 ---
 
@@ -20,7 +20,7 @@ Presence, gaming, and voice activity are recorded automatically with no configur
 All data is stored locally in a SQLite database (`popg.db`). Nothing is posted to channels automatically.
 
 ### AI assistant (Toaster)
-`!chat` and DMs go to **WizardLM2 7B** running on a dedicated GPU machine. Toaster has persistent memory built from voice session transcripts, chat history, and game stats — it remembers what happened in past sessions and can reference them in conversation.
+`!chat` and DMs go to **Qwen 2.5 14B** running on a dedicated dual-GPU Ollama machine. Toaster has persistent memory built from voice session transcripts, chat history, and game stats — it remembers what happened in past sessions and can reference them in conversation. It can also search the web and read linked pages for current info.
 
 ### Voice transcription
 `!join` starts recording a voice channel. Whisper transcribes audio in rolling 5-minute chunks. When the session ends with `!leave`, an AI-generated recap is posted and memories are extracted from the transcript and saved for future conversations.
@@ -46,16 +46,16 @@ All data is stored locally in a SQLite database (`popg.db`). Nothing is posted t
 | `!recap <session_id>` | Everyone | AI-generated summary of a past voice session |
 | `!transcript <session_id>` | Everyone | Raw transcript of a voice session |
 | `!sessions` | Everyone | List recent recorded voice sessions |
-| `!memorybuild` | Everyone | Rebuild Toaster's memory from all stored transcripts |
-| `!reset` | Everyone | Clear your personal chat history with Toaster |
+| `!memorybuild` | Admin | Rebuild Toaster's memory from all stored transcripts |
+| `!reset` | Everyone (DM) / Admin (server) | Clear chat history; `!reset all` also wipes server memories |
 
 Toaster also responds to DMs directly.
 
 ### Voice recording
 | Command | Who | Description |
 |---|---|---|
-| `!join` | Everyone | Start recording the voice channel you're in |
-| `!leave` | Everyone | Stop recording, post recap, save memories |
+| `!join` | Admin | Start recording the voice channel you're in |
+| `!leave` | Admin | Stop recording, post recap, save memories |
 
 ### Admin
 | Command | Who | Description |
@@ -112,29 +112,21 @@ GUILD_ID=your_server_id_here
 
 ### 5. Ollama (required for AI features)
 
-The bot expects two Ollama instances running on the network. Edit the URLs at the top of `cogs/llm.py` to match your setup:
+The bot expects a single Ollama instance on the network. Edit the URL at the top of `cogs/llm.py` to match your setup:
 
 ```python
-# Chat instance
-OLLAMA_URL   = "http://<your-ip>:11435"
-OLLAMA_MODEL = "wizardlm2:7b"
-
-# Analysis instance (summarization, memory extraction)
-OLLAMA_ANALYSIS_URL   = "http://<your-ip>:11434"
-OLLAMA_ANALYSIS_MODEL = "gemma2:9b"
+OLLAMA_URL   = "http://<your-ip>:11434"
+OLLAMA_MODEL = "qwen2.5:14b"
 ```
 
-Pull the models on your Ollama machine:
+Pull the model on your Ollama machine:
 ```bash
-ollama pull wizardlm2:7b
-ollama pull gemma2:9b
+ollama pull qwen2.5:14b
 ```
 
-To run two Ollama instances on separate GPUs:
-```bash
-CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=0.0.0.0:11435 ollama serve
-CUDA_VISIBLE_DEVICES=1 OLLAMA_HOST=0.0.0.0:11434 ollama serve
-```
+The 14B model needs ~10 GB of VRAM. With two smaller GPUs, expose both to one
+Ollama instance (no `CUDA_VISIBLE_DEVICES` restriction) and llama.cpp splits
+the model layers across the cards automatically.
 
 ### 6. Whisper (required for voice transcription)
 

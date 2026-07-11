@@ -156,27 +156,36 @@ def init_db() -> None:
 
     # Remove the FK constraint on chat_messages.channel_id — watch-all mode logs
     # channels that aren't explicitly in watched_channels, causing FK failures.
-    try:
-        conn.executescript("""
-            BEGIN;
-            CREATE TABLE IF NOT EXISTS chat_messages_v2 (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id INTEGER NOT NULL UNIQUE,
-                channel_id INTEGER NOT NULL,
-                user_id    INTEGER NOT NULL,
-                username   TEXT    NOT NULL,
-                content    TEXT    NOT NULL,
-                sent_at    TEXT    NOT NULL
-            );
-            INSERT OR IGNORE INTO chat_messages_v2
-                SELECT id, message_id, channel_id, user_id, username, content, sent_at
-                FROM chat_messages;
-            DROP TABLE chat_messages;
-            ALTER TABLE chat_messages_v2 RENAME TO chat_messages;
-            COMMIT;
-        """)
-    except sqlite3.OperationalError:
-        pass  # already migrated (chat_messages_v2 won't exist on re-run)
+    # Only rebuild if the legacy FK is actually present (otherwise this would
+    # drop and recreate the table on every startup).
+    needs_rebuild = bool(conn.execute("PRAGMA foreign_key_list(chat_messages)").fetchall())
+    if needs_rebuild:
+        try:
+            conn.executescript("""
+                BEGIN;
+                CREATE TABLE chat_messages_v2 (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL UNIQUE,
+                    channel_id INTEGER NOT NULL,
+                    user_id    INTEGER NOT NULL,
+                    username   TEXT    NOT NULL,
+                    content    TEXT    NOT NULL,
+                    sent_at    TEXT    NOT NULL
+                );
+                INSERT OR IGNORE INTO chat_messages_v2
+                    SELECT id, message_id, channel_id, user_id, username, content, sent_at
+                    FROM chat_messages;
+                DROP TABLE chat_messages;
+                ALTER TABLE chat_messages_v2 RENAME TO chat_messages;
+                COMMIT;
+            """)
+        except sqlite3.OperationalError:
+            # Roll back the partial transaction rather than committing it below
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            log.exception("chat_messages FK-removal migration failed — rolled back")
 
     conn.commit()
 
@@ -214,20 +223,29 @@ def open_session(
     ).fetchone()
     if existing:
         return
+    now = _now()
     conn.execute(
         """INSERT INTO sessions (user_id, session_type, game_name, voice_channel_id, platform, started_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (user_id, session_type, game_name, voice_channel_id, platform, _now()),
+        (user_id, session_type, game_name, voice_channel_id, platform, now),
     )
+    # Record the streak day at open too — a session closed as stale (or spanning
+    # midnight) would otherwise leave the day it started uncounted.
+    _record_activity_day(conn, user_id, now[:10])
     conn.commit()
 
 
 def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = None, stale: bool = False) -> Optional[int]:
     """Close the active session and return elapsed seconds, or None if none was open.
 
-    cap_seconds: if set, credits at most this many seconds regardless of actual elapsed time.
-    stale: if True, the session is being closed due to a bot restart — time is credited but
-           session_count is not incremented (the session wasn't intentionally ended by the user).
+    cap_seconds: if set, credits at most this many seconds AND caps the stored
+        ended_at to match — otherwise period leaderboards and partner-overlap
+        queries, which recompute from the raw row, would see the full uncapped
+        span (e.g. a weekend the bot was down).
+    stale: if True, the session is being closed due to a bot restart —
+        session_count is not incremented (the session wasn't intentionally
+        ended by the user). Time, activity days, and partner overlap are still
+        credited using the (capped) real window.
     """
     conn = get_conn()
     row = conn.execute(
@@ -241,12 +259,14 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
     started = datetime.fromisoformat(row["started_at"])
     ended = datetime.fromisoformat(now)
     elapsed = max(0, int((ended - started).total_seconds()))
-    if cap_seconds is not None:
-        elapsed = min(elapsed, cap_seconds)
+    ended_at_str = now
+    if cap_seconds is not None and elapsed > cap_seconds:
+        elapsed = cap_seconds
+        ended_at_str = (started + timedelta(seconds=elapsed)).isoformat()
 
     conn.execute(
         "UPDATE sessions SET ended_at=? WHERE id=?",
-        (now, row["id"]),
+        (ended_at_str, row["id"]),
     )
 
     col_map = {
@@ -279,12 +299,14 @@ def close_session(user_id: int, session_type: str, cap_seconds: Optional[int] = 
                 last_played   = excluded.last_played
         """, (user_id, row["game_name"], elapsed, count_increment, now))
 
-    if not stale:
-        _record_activity_day(conn, user_id, now[:10])
-        if session_type == "gaming" and row["game_name"]:
-            _update_game_partners(conn, user_id, row["game_name"], row["started_at"], now)
-        if session_type == "voice" and row["voice_channel_id"]:
-            _update_voice_partners(conn, user_id, row["voice_channel_id"], row["started_at"], now)
+    # Streak days and partner overlap use the capped window, so they're safe to
+    # record even for stale closes — skipping them (the old behavior) meant a
+    # restart/reconnect silently erased streaks and shared time.
+    _record_activity_day(conn, user_id, ended_at_str[:10])
+    if session_type == "gaming" and row["game_name"]:
+        _update_game_partners(conn, user_id, row["game_name"], row["started_at"], ended_at_str)
+    if session_type == "voice" and row["voice_channel_id"]:
+        _update_voice_partners(conn, user_id, row["voice_channel_id"], row["started_at"], ended_at_str)
 
     conn.commit()
     return elapsed
@@ -402,7 +424,19 @@ def get_user_stats(user_id: int) -> Optional[dict]:
                 g["total_seconds"] += live_secs
                 break
         else:
-            stats["top_games"].insert(0, {"game_name": game_name, "total_seconds": live_secs, "session_count": 1})
+            # Game isn't in the top-3 fetch — include its stored history, not
+            # just the live time, or a 7h game shows as 30 minutes.
+            hist = conn.execute(
+                "SELECT total_seconds, session_count FROM game_stats WHERE user_id=? AND game_name=?",
+                (user_id, game_name),
+            ).fetchone()
+            base_secs  = hist["total_seconds"] if hist else 0
+            base_count = hist["session_count"] if hist else 0
+            stats["top_games"].insert(0, {
+                "game_name": game_name,
+                "total_seconds": base_secs + live_secs,
+                "session_count": base_count + 1,
+            })
         stats["top_games"].sort(key=lambda x: x["total_seconds"], reverse=True)
         stats["top_games"] = stats["top_games"][:3]
 
@@ -438,11 +472,20 @@ def get_leaderboard(category: str, limit: int = 10) -> list[dict]:
     for row in rows:
         score = row["score"]
         if category in ("desktop", "mobile"):
-            # Only count live session if platform matches
-            active = conn.execute(
-                "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' AND platform=? AND ended_at IS NULL",
-                (row["user_id"], category),
-            ).fetchone()
+            # Only count live session if platform matches. NULL platform is
+            # treated as desktop, matching how close_session credits it.
+            if category == "desktop":
+                active = conn.execute(
+                    "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' "
+                    "AND (platform='desktop' OR platform IS NULL) AND ended_at IS NULL",
+                    (row["user_id"],),
+                ).fetchone()
+            else:
+                active = conn.execute(
+                    "SELECT started_at FROM sessions WHERE user_id=? AND session_type='online' "
+                    "AND platform='mobile' AND ended_at IS NULL",
+                    (row["user_id"],),
+                ).fetchone()
         else:
             active = conn.execute(
                 "SELECT started_at FROM sessions WHERE user_id=? AND session_type=? AND ended_at IS NULL",
@@ -547,6 +590,9 @@ def wipe_all_data() -> dict[str, int]:
         "game_partners",
         "chat_messages",
         "watched_channels",
+        "memories",
+        "dm_history",
+        "channel_chat_history",
         "game_stats",
         "sessions",
         "users",
@@ -614,18 +660,27 @@ def get_leaderboard_for_game(game_name: str, limit: int = 10) -> tuple[str | Non
             "session_count": row["session_count"],
         })
 
-    # Include members currently playing but with no historical game_stats entry
+    # Include members currently playing but not in the fetched rows (no
+    # game_stats entry yet, OR truncated by the LIMIT) — count their stored
+    # history too, not just the live session.
     existing_ids = {r["user_id"] for r in results}
     for uid, elapsed in live_map.items():
         if uid not in existing_ids:
             user = conn.execute("SELECT display_name FROM users WHERE user_id=?", (uid,)).fetchone()
-            if user:
-                results.append({
-                    "user_id": uid,
-                    "display_name": user["display_name"],
-                    "total_seconds": elapsed,
-                    "session_count": 1,  # currently in a session
-                })
+            if not user:
+                continue
+            hist = conn.execute(
+                "SELECT total_seconds, session_count FROM game_stats WHERE user_id=? AND game_name=?",
+                (uid, matched),
+            ).fetchone()
+            base_secs  = hist["total_seconds"] if hist else 0
+            base_count = hist["session_count"] if hist else 0
+            results.append({
+                "user_id": uid,
+                "display_name": user["display_name"],
+                "total_seconds": base_secs + elapsed,
+                "session_count": base_count + 1,  # currently in a session
+            })
 
     results.sort(key=lambda x: x["total_seconds"], reverse=True)
     return matched, results[:limit]
@@ -735,8 +790,8 @@ def get_streaks(user_id: int) -> tuple[int, int]:
             else:
                 break
 
-    # Longest streak
-    longest = current
+    # Longest streak — any activity at all means a streak of at least 1
+    longest = max(current, 1)
     streak = 1
     for i in range(1, len(dates)):
         d1 = datetime.strptime(dates[i - 1], "%Y-%m-%d").date()
@@ -810,17 +865,24 @@ def get_messages_for_llm(channel_id: int, limit: int = 200) -> list[dict]:
 
 def get_dm_history(user_id: int) -> list[dict]:
     """Load stored DM conversation history for a user. Returns [] if none."""
+    row = get_dm_history_row(user_id)
+    return row["messages"] if row else []
+
+
+def get_dm_history_row(user_id: int) -> Optional[dict]:
+    """Load DM history with its last_updated timestamp, or None if none stored."""
     import json
     conn = get_conn()
     row = conn.execute(
-        "SELECT messages FROM dm_history WHERE user_id=?", (user_id,)
+        "SELECT messages, last_updated FROM dm_history WHERE user_id=?", (user_id,)
     ).fetchone()
     if row is None:
-        return []
+        return None
     try:
-        return json.loads(row["messages"])
+        messages = json.loads(row["messages"])
     except (ValueError, TypeError):
-        return []
+        messages = []
+    return {"messages": messages, "last_updated": row["last_updated"]}
 
 
 def save_dm_history(user_id: int, messages: list[dict]) -> None:
@@ -1009,6 +1071,15 @@ def get_transcripts_pending_memory() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         "SELECT id FROM voice_transcripts WHERE status='done' AND memory_extracted=0 ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_transcripts_stuck_processing() -> list[dict]:
+    """Return ended sessions stuck in 'processing' (bot died mid-summary)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM voice_transcripts WHERE status='processing' AND ended_at IS NOT NULL ORDER BY id"
     ).fetchall()
     return [dict(r) for r in rows]
 
