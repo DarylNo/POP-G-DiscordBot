@@ -1299,7 +1299,10 @@ class LLM(commands.Cog):
                     )
                     context_tag = "Search unavailable"
 
-        system_with_memory = _CHAT_SYSTEM + _build_memory_block(scope_type, scope_id, relevant_mems)
+        # Give the model a clock — without this it guesses the time when asked
+        now_et = datetime.now(_TZ_TORONTO)
+        time_line = f"\nCurrent date/time: {now_et.strftime('%A, %B %d %Y, %-I:%M %p')} Eastern Time."
+        system_with_memory = _CHAT_SYSTEM + time_line + _build_memory_block(scope_type, scope_id, relevant_mems)
         full_messages: list[dict] = [{"role": "system", "content": system_with_memory}]
         full_messages.extend(_strip_message(m) for m in session["messages"])
         # Live voice awareness — if a recording session is running, Toaster can
