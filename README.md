@@ -2,7 +2,7 @@
 
 The Discord bot for **Past our Prime Gamers**. A local-LLM "barkeep" that hangs out in the server — passively reading chat, auto-transcribing voice, and answering when addressed — while silently tracking member activity in the background.
 
-Current version: **1.14.2**
+Current version: **1.14.3**
 
 ---
 

@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-VERSION = "1.14.2"
+VERSION = "1.14.3"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 PREFIX = os.getenv("PREFIX", "!")
