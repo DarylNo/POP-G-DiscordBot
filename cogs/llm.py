@@ -903,11 +903,11 @@ class LLM(commands.Cog):
         self._barkeep_optout: set[int] = set(database.get_barkeep_optouts())
         # Absorbed lines awaiting ambient memory extraction
         self._ambient_pending: list[str] = []
-        # Auto-post governor state
+        # Auto-post governor state. Defaults: greetings on, chime-in on,
+        # milestones off. Each is a persisted per-behavior toggle.
         self._quiet = database.get_flag("auto_post_quiet", "0") == "1"
-        # Ambient chime-in is OFF by default (most intrusive behavior) —
-        # greetings and milestones stay on. Enable with !barkeep chime on.
-        self._chime_enabled = database.get_flag("chime_enabled", "0") == "1"
+        self._chime_enabled = database.get_flag("chime_enabled", "1") == "1"
+        self._milestones_enabled = database.get_flag("milestones_enabled", "0") == "1"
         self._last_auto_post: datetime | None = None
         self._last_chime: datetime | None = None
         self._last_greeting: datetime | None = None
@@ -1495,6 +1495,8 @@ class LLM(commands.Cog):
     @commands.Cog.listener()
     async def on_popg_milestone(self, events: list[dict]) -> None:
         """Fired by tracking when a member crosses a streak/playtime milestone."""
+        if not self._milestones_enabled:
+            return
         for ev in events:
             if ev["type"] == "streak":
                 text = (f"🍺 {ev['display_name']} is on a **{ev['value']}-day streak**. "
@@ -1766,9 +1768,10 @@ class LLM(commands.Cog):
     @commands.command(name="barkeep")
     async def barkeep(self, ctx: commands.Context, mode: str = None) -> None:
         """Admin barkeep controls:
-          `!barkeep on|off`      — toggle reading THIS channel
-          `!barkeep quiet|speak` — mute / unmute all unprompted auto-posts (server-wide)
-          `!barkeep chime on|off` — toggle ambient chime-in (off by default)
+          `!barkeep on|off`          — toggle reading THIS channel
+          `!barkeep quiet|speak`     — mute / unmute ALL unprompted auto-posts (server-wide)
+          `!barkeep chime on|off`      — toggle ambient chime-in (on by default)
+          `!barkeep milestones on|off` — toggle milestone posts (off by default)
         """
         from cogs.admin import _is_admin
         if not _is_admin(ctx):
@@ -1777,18 +1780,19 @@ class LLM(commands.Cog):
 
         m = (mode or "").lower()
 
-        # Ambient chime-in toggle (off by default)
-        if m == "chime":
+        # Per-behavior toggles: !barkeep chime on|off / !barkeep milestones on|off
+        if m in ("chime", "milestones", "milestone"):
             arg = (ctx.message.content.split()[2:] or [""])[0].lower()
+            attr = "_chime_enabled" if m == "chime" else "_milestones_enabled"
+            flag = "chime_enabled" if m == "chime" else "milestones_enabled"
+            label = "Ambient chime-in" if m == "chime" else "Milestone posts"
             if arg not in ("on", "off"):
-                state = "ON" if self._chime_enabled else "OFF"
-                await ctx.send(f"Ambient chime-in is **{state}**. `!barkeep chime on|off` to change.")
+                state = "ON" if getattr(self, attr) else "OFF"
+                await ctx.send(f"{label} is **{state}**. `!barkeep {m} on|off` to change.")
                 return
-            self._chime_enabled = (arg == "on")
-            database.set_flag("chime_enabled", "1" if self._chime_enabled else "0")
-            await ctx.send("Ambient chime-in **on** — I'll occasionally drop a line into the chat."
-                           if self._chime_enabled else
-                           "Ambient chime-in **off** — I'll only greet voice and mark milestones.")
+            setattr(self, attr, arg == "on")
+            database.set_flag(flag, "1" if getattr(self, attr) else "0")
+            await ctx.send(f"{label} **{'on' if getattr(self, attr) else 'off'}**.")
             return
 
         # Global auto-post mute
@@ -1807,10 +1811,12 @@ class LLM(commands.Cog):
             read = "OFF" if ctx.channel.id in self._barkeep_optout else "ON"
             posts = "MUTED" if self._quiet else "ON"
             chime = "ON" if self._chime_enabled else "OFF"
+            miles = "ON" if self._milestones_enabled else "OFF"
             await ctx.send(
-                f"Reading this channel: **{read}** · Auto-posts: **{posts}** · Chime-in: **{chime}**\n"
-                f"`!barkeep on|off` (read here) · `!barkeep quiet|speak` (auto-posts) · "
-                f"`!barkeep chime on|off` (ambient chime-in)."
+                f"Reading here: **{read}** · Auto-posts: **{posts}** · "
+                f"Chime-in: **{chime}** · Milestones: **{miles}**\n"
+                f"`!barkeep on|off` (read here) · `!barkeep quiet|speak` (all auto-posts) · "
+                f"`!barkeep chime on|off` · `!barkeep milestones on|off`."
             )
             return
         if m == "off":
