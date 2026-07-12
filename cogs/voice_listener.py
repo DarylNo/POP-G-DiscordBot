@@ -58,7 +58,20 @@ class TimestampedSink(WaveSink):
         self._written: dict[int, int] = {}
         self._last_packet: dict[int, float] = {}
 
-    def write(self, data: bytes, user) -> None:
+    @staticmethod
+    def _pcm_len(data) -> int:
+        """Byte length of a write payload. `data` is raw PCM bytes on stock
+        py-cord but a VoiceData wrapper on the voice-receive fork — handle both
+        without ever raising, so audio capture can't be broken by a bad guess."""
+        for candidate in (data, getattr(data, "pcm", None), getattr(data, "decoded_data", None)):
+            try:
+                if candidate is not None:
+                    return len(candidate)
+            except TypeError:
+                continue
+        return 0
+
+    def write(self, data, user) -> None:
         uid = user.id if hasattr(user, "id") else int(user)
         now = _time.monotonic() - self._start
         written = self._written.get(uid, 0)
@@ -66,7 +79,9 @@ class TimestampedSink(WaveSink):
         if last is None or (now - last) > self.GAP_SECS:
             self._anchors.setdefault(uid, []).append((written, now))
         self._last_packet[uid] = now
-        self._written[uid] = written + len(data)
+        self._written[uid] = written + self._pcm_len(data)
+        # MUST run even if length bookkeeping above found nothing — this is what
+        # actually stores the audio.
         super().write(data, user)
 
     def wall_offset(self, uid: int, audio_secs: float) -> float:
