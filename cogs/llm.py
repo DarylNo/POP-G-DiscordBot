@@ -95,7 +95,11 @@ _TIMESTAMP_NOTE = (
     "(so [0:05:00] means five minutes in), NOT a clock time. "
     "NEVER state clock times or times of day (no AM/PM, no '8:27 PM'). "
     "Describe who joined or left only in relative terms ('early on', 'later', "
-    "'dropped in and out') — never with specific times, and never invent a timeline."
+    "'dropped in and out') — never with specific times, and never invent a timeline.\n"
+    "Lines attributed to [Session] are AUTOMATIC event markers (joins, leaves, game "
+    "changes) — not speech. The recap is about what people SAID; use markers only as "
+    "light background. If the transcript has no spoken lines (only [Session] markers), "
+    "say plainly that no conversation was captured — do not narrate the markers as a story."
 )
 
 _SUMMARY_SYSTEM = (
@@ -126,8 +130,10 @@ _SUMMARY_CHUNK_CHARS = 6000
 
 _SUMMARY_PROMPT = """\
 Write a short, fun summary of this voice chat session based ONLY on what is in the transcript below.
+Focus on what people actually SAID — topics, games discussed, jokes, decisions. Lines from [Session] are automatic join/leave/game-change markers, not speech; treat them as background only.
 Only mention topics, games, and moments that are explicitly present. Do NOT invent or expand on anything not stated.
 The [H:MM:SS] prefixes are elapsed time into the session, NOT clock times — do NOT mention any times of day (no AM/PM), and don't invent when people joined or left.
+If there are no spoken lines at all, just say no conversation was captured this session.
 If the session was brief or only one thing was said, just recap that one thing — keep it proportional to the actual content.
 Keep it under 200 words and match the casual tone of the server.
 
