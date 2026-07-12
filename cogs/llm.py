@@ -87,24 +87,38 @@ _last_chat_at: dict[int, datetime] = {}
 
 _TZ_TORONTO = ZoneInfo("America/Toronto")
 
+# The [H:MM:SS] prefix on each transcript line is ELAPSED time since the
+# session started, not a clock time. Without this note the model reads them as
+# times of day and fabricates an AM/PM "who came and went when" narrative.
+_TIMESTAMP_NOTE = (
+    "Each line is prefixed with [H:MM:SS] = time ELAPSED since the session began "
+    "(so [0:05:00] means five minutes in), NOT a clock time. "
+    "NEVER state clock times or times of day (no AM/PM, no '8:27 PM'). "
+    "Describe who joined or left only in relative terms ('early on', 'later', "
+    "'dropped in and out') — never with specific times, and never invent a timeline."
+)
+
 _SUMMARY_SYSTEM = (
     'You are a recap writer for "Past our Prime Gamers" (POPG), a Discord server of older casual gamers. '
     "Write short, fun summaries of their voice chat sessions. "
     "CRITICAL: Only describe what is literally present in the transcript. "
     "Do NOT invent topics, games, jokes, or details that are not explicitly stated. "
-    "If the transcript is short or sparse, write a short recap — do not pad or fabricate."
+    "If the transcript is short or sparse, write a short recap — do not pad or fabricate.\n"
+    + _TIMESTAMP_NOTE
 )
 
 _SUMMARY_CHUNK_SYSTEM = (
     'You are extracting key points from part of a voice chat session from "Past our Prime Gamers" (POPG). '
     "List the main topics, games mentioned, notable moments or quotes. Reply with bullet points only. "
-    "Only include points that are explicitly stated in the transcript."
+    "Only include points that are explicitly stated in the transcript.\n"
+    + _TIMESTAMP_NOTE
 )
 
 _SUMMARY_COMBINE_SYSTEM = (
     'You are writing a final session recap for "Past our Prime Gamers" (POPG), '
     "a Discord server of older casual gamers. "
-    "Only use the bullet points provided — do not invent or expand beyond what is listed."
+    "Only use the bullet points provided — do not invent or expand beyond what is listed. "
+    "Never state clock times or times of day; describe comings and goings only relatively."
 )
 
 # Per-chunk character limit for map phase (~1500 tokens, fits 8k ctx with system prompt)
@@ -113,6 +127,7 @@ _SUMMARY_CHUNK_CHARS = 6000
 _SUMMARY_PROMPT = """\
 Write a short, fun summary of this voice chat session based ONLY on what is in the transcript below.
 Only mention topics, games, and moments that are explicitly present. Do NOT invent or expand on anything not stated.
+The [H:MM:SS] prefixes are elapsed time into the session, NOT clock times — do NOT mention any times of day (no AM/PM), and don't invent when people joined or left.
 If the session was brief or only one thing was said, just recap that one thing — keep it proportional to the actual content.
 Keep it under 200 words and match the casual tone of the server.
 
