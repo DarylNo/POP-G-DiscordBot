@@ -148,6 +148,11 @@ class VoiceListener(commands.Cog):
         self._model = None
         # guild_id -> state dict (see _make_entry)
         self._active: dict[int, dict] = {}
+        # guild_id -> channel_id the bot was kicked/dropped from. Auto-join
+        # stays out of that channel until it fully empties (fresh gathering) or
+        # an admin runs !join. Without this, the next voice-state ripple would
+        # walk the bot right back in after a kick.
+        self._kicked_from: dict[int, int] = {}
         # Keep references to fire-and-forget tasks so they can't be GC'd mid-flight
         self._bg_tasks: set = set()
         self._chunk_rotator.start()
@@ -177,6 +182,7 @@ class VoiceListener(commands.Cog):
             "rotating":      False,               # True while a rotation is in-flight
             "proc_lock":     asyncio.Lock(),      # serializes chunk processing per session
             "auto":          auto,                # True when auto-joined (barkeep mode)
+            "channel_id":    vc.channel.id if vc.channel else 0,  # last known channel (survives dead vc)
         }
 
     # ------------------------------------------------------------------ #
@@ -230,6 +236,12 @@ class VoiceListener(commands.Cog):
         entry["is_final"] = True
         session_id = entry["session_id"]
         log.warning("Session %d: aborting — %s", session_id, reason)
+        # If it got kicked (or dropped), it stays out: suppress auto-join for
+        # this channel until it empties or an admin runs !join.
+        ch = entry["vc"].channel
+        ch_id = ch.id if ch else entry.get("channel_id", 0)
+        if ch_id:
+            self._kicked_from[guild_id] = ch_id
         try:
             # Flush the last chunk through the normal final path if possible
             entry["vc"].stop_recording()
@@ -294,6 +306,9 @@ class VoiceListener(commands.Cog):
         if target is None:
             await ctx.send("Join a voice channel first, or specify one: `!join #channel`.")
             return
+
+        # An explicit !join overrides any stay-out-after-kick suppression
+        self._kicked_from.pop(ctx.guild.id, None)
 
         try:
             vc = await target.connect()
@@ -509,6 +524,8 @@ class VoiceListener(commands.Cog):
             return
         if guild.id in self._active:
             return
+        if self._kicked_from.get(guild.id) == channel.id:
+            return  # kicked/dropped from this channel — stay out until it empties
         humans = [m for m in channel.members if not m.bot]
         if len(humans) < VOICE_AUTO_MIN_MEMBERS:
             return
@@ -562,6 +579,15 @@ class VoiceListener(commands.Cog):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
+        # A kick suppression expires once that channel fully empties — the next
+        # gathering there is a fresh one and auto-join may fire again.
+        kicked_ch_id = self._kicked_from.get(member.guild.id)
+        if kicked_ch_id:
+            kicked_ch = member.guild.get_channel(kicked_ch_id)
+            if kicked_ch is None or not any(not m.bot for m in kicked_ch.members):
+                self._kicked_from.pop(member.guild.id, None)
+                log.info("Auto-join suppression for channel %d cleared (channel emptied)", kicked_ch_id)
+
         entry = self._active.get(member.guild.id)
         if entry is None:
             if not member.bot and after.channel is not None:
@@ -573,6 +599,7 @@ class VoiceListener(commands.Cog):
             if after.channel is None and not entry["is_final"]:
                 self._spawn(self._abort_session(member.guild.id, "bot was disconnected from voice"))
             elif after.channel is not None and before.channel != after.channel:
+                entry["channel_id"] = after.channel.id
                 self._record_event(member.guild.id, 0, f"Recording moved to {after.channel.name}")
             return
         if member.bot:
